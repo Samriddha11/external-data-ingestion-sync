@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+validation_report.json
+.env
+*.csv
+!examples/sample_focus.csv

@@ -1,0 +1,328 @@
+pipeline:
+  name: CACM External Cost Ingest
+  identifier: cacm_external_cost_ingest
+  projectIdentifier: CCMDemo
+  orgIdentifier: sam
+  tags:
+    cacm: external-ingest
+  variables:
+    - name: provider_id
+      type: String
+      description: External Cost Data Source UUID from CACM Account Settings
+      required: true
+      value: <+input>
+    - name: provider_type
+      type: String
+      description: custom, snowflake, or databricks
+      required: false
+      value: <+input>.default(snowflake)
+    - name: invoice_period
+      type: String
+      description: YYYYMMDD-YYYYMMDD (omit when derive_invoice_period_from_csv=true)
+      required: false
+      value: <+input>.default()
+    - name: derive_invoice_period_from_csv
+      type: String
+      description: Set true to derive invoice period from BillingPeriodStart/End in CSV
+      required: false
+      value: <+input>.default(true)
+    - name: object_uri
+      type: String
+      description: "Any cloud CSV URI (overrides object_uri_s3/gcs/azure). Examples: s3://b/k.csv, gs://b/k.csv, https://acct.blob.core.windows.net/c/k.csv"
+      required: false
+      value: <+input>.default()
+    - name: object_uri_s3
+      type: String
+      description: AWS S3 CSV — s3://bucket/path/file.csv (use when not using object_uri)
+      required: false
+      value: <+input>.default()
+    - name: object_uri_gcs
+      type: String
+      description: GCP GCS CSV — gs://bucket/path/file.csv
+      required: false
+      value: <+input>.default()
+    - name: object_uri_azure
+      type: String
+      description: Azure Blob CSV — https://account.blob.core.windows.net/container/file.csv or azure://account/container/file.csv
+      required: false
+      value: <+input>.default()
+    - name: input_file
+      type: String
+      description: CSV filename under repo_path or absolute path on delegate
+      required: false
+      value: <+input>.default()
+    - name: use_sample
+      type: String
+      description: Set true to use bundled sample_focus.csv from external-data-sync-job
+      required: false
+      value: <+input>.default(false)
+    - name: validate_only
+      type: String
+      description: Set true to skip ingest API calls
+      required: false
+      value: <+input>.default(false)
+    - name: repo_object_prefix
+      type: String
+      description: "Any cloud folder with external-data-sync-job code (overrides repo_* below)"
+      required: false
+      value: <+input>.default()
+    - name: repo_object_prefix_s3
+      type: String
+      description: AWS — s3://bucket/external-data-sync-job/ (upload external-data-sync-job here)
+      required: false
+      value: <+input>.default()
+    - name: repo_object_prefix_gcs
+      type: String
+      description: GCP — gs://bucket/external-data-sync-job/
+      required: false
+      value: <+input>.default()
+    - name: repo_object_prefix_azure
+      type: String
+      description: Azure — .../container/external-data-sync-job/ or azure://account/container/external-data-sync-job/
+      required: false
+      value: <+input>.default()
+    - name: repo_path
+      type: String
+      description: Absolute path to external-data-sync-job on delegate (optional if repo_object_prefix* is set)
+      required: false
+      value: <+input>.default()
+    - name: git_connector_ref
+      type: String
+      description: Git connector ID — clone external-data-sync-job repo (preferred over S3 repo prefix)
+      required: false
+      value: <+input>.default()
+    - name: git_repo_name
+      type: String
+      description: Repo for Git clone (GitHub org/repo)
+      required: false
+      value: <+input>.default(Samriddha11/external-data-ingestion-sync)
+    - name: git_branch
+      type: String
+      description: Branch to clone for external-data-sync-job
+      required: false
+      value: <+input>.default(main)
+  stages:
+    - stage:
+        name: Ingest
+        identifier: Ingest
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: GitClone
+                  name: Clone external-data-sync-job
+                  identifier: Clone_external_data_sync_job
+                  spec:
+                    connectorRef: <+pipeline.variables.git_connector_ref>
+                    repoName: <+pipeline.variables.git_repo_name>
+                    build:
+                      type: branch
+                      spec:
+                        branch: <+pipeline.variables.git_branch>
+                    cloneDirectory: external-data-sync-job
+                  when:
+                    condition: <+pipeline.variables.git_connector_ref> != null && <+pipeline.variables.git_connector_ref> != "" && <+pipeline.variables.git_connector_ref> != "null"
+              - step:
+                  type: ShellScript
+                  name: Transform Validate Ingest
+                  identifier: Transform_Validate_Ingest
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -euo pipefail
+
+                          resolve_ingest_repo() {
+                            local root="$1"
+                            if [ -f "$root/cacm_external_ingest/cli.py" ]; then
+                              echo "$root"
+                              return 0
+                            fi
+                            local hit
+                            hit=$(find "$root" -type f -path '*/cacm_external_ingest/cli.py' 2>/dev/null | head -1 || true)
+                            if [ -n "$hit" ]; then
+                              echo "${hit%/cacm_external_ingest/cli.py}"
+                              return 0
+                            fi
+                            return 1
+                          }
+
+                          sync_azure_prefix() {
+                            local uri="$1" dest="$2"
+                            local account="" container="" prefix=""
+                            if [[ "$uri" == azure://* ]]; then
+                              local stripped="${uri#azure://}"
+                              account="${stripped%%/*}"
+                              local rest="${stripped#*/}"
+                              container="${rest%%/*}"
+                              prefix="${rest#*/}"
+                            elif [[ "$uri" == https://*blob.core.windows.net/* ]]; then
+                              local host pathpart
+                              host=$(echo "$uri" | sed -E 's|https://([^/]+)/.*|\1|')
+                              pathpart=$(echo "$uri" | sed -E 's|https://[^/]+/||' | sed 's|/*$||')
+                              account="${host%%.blob.core.windows.net}"
+                              container="${pathpart%%/*}"
+                              prefix="${pathpart#*/}"
+                              if [ "$prefix" = "$container" ]; then prefix=""; fi
+                            else
+                              echo "Not an Azure blob prefix: $uri"
+                              return 1
+                            fi
+                            local -a cmd=(az storage blob download-batch --destination "$dest" --source "$container" --account-name "$account")
+                            if [ -n "$prefix" ]; then
+                              cmd+=(--pattern "${prefix}*")
+                            fi
+                            "${cmd[@]}"
+                          }
+
+                          sync_cloud_prefix() {
+                            local uri="$1" dest="$2"
+                            case "$uri" in
+                              s3://*)
+                                aws s3 sync "${uri%/}/" "$dest/" --exclude ".venv/*" --exclude "*/.venv/*"
+                                ;;
+                              gs://*)
+                                gcloud storage cp -r "${uri%/}" "$dest/" --exclude=".venv/**" \
+                                  || gsutil -m cp -r "${uri%/}" "$dest/"
+                                ;;
+                              azure://*|https://*blob.core.windows.net/*)
+                                sync_azure_prefix "$uri" "$dest"
+                                ;;
+                              *)
+                                echo "Unsupported repo prefix (use s3://, gs://, or Azure blob URL): $uri"
+                                return 1
+                                ;;
+                            esac
+                          }
+
+                          pick_first_uri() {
+                            for u in "$@"; do
+                              if [ -n "$u" ] && [ "$u" != "null" ]; then
+                                echo "$u"
+                                return 0
+                              fi
+                            done
+                            return 1
+                          }
+
+                          REPO=""
+                          REPO_RAW="<+pipeline.variables.repo_path>"
+                          REPO_RAW="${REPO_RAW//\"/}"
+                          if [ "$REPO_RAW" != "null" ] && [ -n "$REPO_RAW" ]; then
+                            REPO="$REPO_RAW"
+                          fi
+
+                          for candidate in \
+                            "${HARNESS_NODE_WORKSPACE:-}/external-data-sync-job" \
+                            "./external-data-sync-job" \
+                            "${PWD}/external-data-sync-job"; do
+                            if [ -f "${candidate}/cacm_external_ingest/cli.py" ]; then
+                              REPO="${candidate}"
+                              break
+                            fi
+                          done
+
+                          REPO_SYNC=$(pick_first_uri \
+                            "<+pipeline.variables.repo_object_prefix>" \
+                            "<+pipeline.variables.repo_object_prefix_s3>" \
+                            "<+pipeline.variables.repo_object_prefix_gcs>" \
+                            "<+pipeline.variables.repo_object_prefix_azure>" \
+                          ) || REPO_SYNC=""
+
+                          if [ -n "$REPO_SYNC" ]; then
+                            STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
+                            rm -rf "$STAGE"
+                            mkdir -p "$STAGE"
+                            sync_cloud_prefix "$REPO_SYNC" "$STAGE"
+                            REPO=$(resolve_ingest_repo "$STAGE") || REPO=""
+                          fi
+
+                          if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
+                            echo "external-data-sync-job code not found on this delegate."
+                            echo "Use ONE of:"
+                            echo "  • git_connector_ref + git_repo_name (+ git_branch) — Git Clone step"
+                            echo "  • repo_object_prefix_* (e.g. s3://bucket/external-data-sync-job/)"
+                            echo "  • repo_path (absolute path on delegate)"
+                            exit 1
+                          fi
+
+                          python3 -m pip install -q -r "$REPO/requirements.txt" || python3 -m pip install -q requests
+                          export PYTHONPATH="$REPO"
+                          WORKDIR="${HARNESS_TMP:-/tmp}/cacm-ingest-$$"
+                          mkdir -p "$WORKDIR"
+                          ACCOUNT_ID="<+account.identifier>"
+                          API_KEY='<+secrets.getValue("Sam-API-Key")>'
+                          PROVIDER_ID="<+pipeline.variables.provider_id>"
+                          PROVIDER_TYPE="<+pipeline.variables.provider_type>"
+                          INVOICE="<+pipeline.variables.invoice_period>"
+                          DERIVE="<+pipeline.variables.derive_invoice_period_from_csv>"
+                          INPUT_FILE="<+pipeline.variables.input_file>"
+                          USE_SAMPLE="<+pipeline.variables.use_sample>"
+                          VALIDATE_ONLY="<+pipeline.variables.validate_only>"
+
+                          REMOTE_URI=$(pick_first_uri \
+                            "<+pipeline.variables.object_uri>" \
+                            "<+pipeline.variables.object_uri_s3>" \
+                            "<+pipeline.variables.object_uri_gcs>" \
+                            "<+pipeline.variables.object_uri_azure>" \
+                          ) || REMOTE_URI=""
+
+                          INPUT_ARGS=""
+                          if [ "$USE_SAMPLE" = "true" ]; then
+                            INPUT_ARGS="--input-file $REPO/examples/sample_focus.csv"
+                          elif [ -n "$REMOTE_URI" ]; then
+                            INPUT_ARGS="--object-uri $REMOTE_URI"
+                          elif [ -n "$INPUT_FILE" ] && [ "$INPUT_FILE" != "null" ]; then
+                            if [ -f "$INPUT_FILE" ]; then
+                              INPUT_ARGS="--input-file $INPUT_FILE"
+                            elif [ -f "$REPO/$INPUT_FILE" ]; then
+                              INPUT_ARGS="--input-file $REPO/$INPUT_FILE"
+                            else
+                              echo "input_file not found: $INPUT_FILE"
+                              exit 1
+                            fi
+                          else
+                            echo "Set use_sample=true, object_uri (or object_uri_s3/gcs/azure), or input_file"
+                            exit 1
+                          fi
+
+                          EXTRA=""
+                          if [ "$VALIDATE_ONLY" = "true" ]; then
+                            EXTRA="--validate-only"
+                          fi
+                          if [ "$DERIVE" = "true" ]; then
+                            EXTRA="$EXTRA --derive-invoice-period-from-csv"
+                          elif [ -n "$INVOICE" ] && [ "$INVOICE" != "null" ]; then
+                            EXTRA="$EXTRA --invoice-period $INVOICE"
+                          else
+                            echo "Set derive_invoice_period_from_csv=true or provide invoice_period"
+                            exit 1
+                          fi
+
+                          python3 -m cacm_external_ingest.cli \
+                            --account-id "$ACCOUNT_ID" \
+                            --api-key "$API_KEY" \
+                            --provider-id "$PROVIDER_ID" \
+                            --provider-type "$PROVIDER_TYPE" \
+                            --report-out "$WORKDIR/validation_report.json" \
+                            $EXTRA \
+                            $INPUT_ARGS
+
+                          if [ -f "$WORKDIR/validation_report.json" ]; then
+                            export validation_summary=$(python3 -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
+                          fi
+                    environmentVariables: []
+                    outputVariables:
+                      - name: validation_summary
+                        type: String
+                        value: validation_summary
+                  timeout: 30m
+          environment:
+            environmentRef: local
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: local
+        tags: {}

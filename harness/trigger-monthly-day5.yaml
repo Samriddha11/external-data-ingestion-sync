@@ -1,0 +1,45 @@
+# Cron: 06:00 UTC on day 5 of every month (11:30 AM IST).
+# Harness evaluates UNIX cron in UTC unless timezone FF is enabled on your account.
+# UI: Pipeline Studio → Triggers → New Trigger → Cron → paste or import this file.
+trigger:
+  name: CACM External Cost Monthly Day 5
+  identifier: cacm_external_cost_monthly_day5
+  enabled: true
+  orgIdentifier: sam
+  projectIdentifier: CCMDemo
+  pipelineIdentifier: cacm_external_cost_ingest
+  description: Ingest prior-month Snowflake export on the 5th (configure CSV URI in inputYaml)
+  tags:
+    cacm: external-ingest
+  source:
+    type: Scheduled
+    spec:
+      type: Cron
+      spec:
+        type: UNIX
+        expression: "0 6 5 * *"
+  inputYaml: |
+    pipeline:
+      identifier: cacm_external_cost_ingest
+      variables:
+        - name: provider_id
+          type: String
+          value: 6aaa161da729b114c9ffc862
+        - name: provider_type
+          type: String
+          value: snowflake
+        - name: derive_invoice_period_from_csv
+          type: String
+          value: "true"
+        - name: validate_only
+          type: String
+          value: "false"
+        - name: use_sample
+          type: String
+          value: "false"
+        - name: repo_object_prefix_s3
+          type: String
+          value: s3://sam-edi-harness-test/external-data-sync-job
+        - name: object_uri_s3
+          type: String
+          value: s3://sam-edi-harness-test/incoming/monthly-snowflake.csv
