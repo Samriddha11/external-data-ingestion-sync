@@ -237,7 +237,35 @@ pipeline:
                           fi
                           echo "Using code at: $REPO"
 
-                          python3 -m pip install -q -r "$REPO/requirements.txt" || python3 -m pip install -q requests
+                          # Harness delegate images often lack python3 — bootstrap via uv (no root)
+                          UV_HOME="${HARNESS_TMP:-/tmp}/uv-home-$$"
+                          VENV_DIR=""
+                          if command -v python3 >/dev/null 2>&1; then
+                            PYTHON_BIN="$(command -v python3)"
+                          elif command -v python >/dev/null 2>&1; then
+                            PYTHON_BIN="$(command -v python)"
+                          else
+                            echo "python3 not on PATH — installing via uv"
+                            if ! command -v curl >/dev/null 2>&1; then
+                              echo "curl is required to bootstrap Python on this delegate"
+                              exit 1
+                            fi
+                            VENV_DIR="${HARNESS_TMP:-/tmp}/cacm-venv-$$"
+                            export UV_INSTALL_DIR="$UV_HOME"
+                            curl -LsSf https://astral.sh/uv/install.sh | sh
+                            export PATH="$UV_HOME/bin:${HOME}/.local/bin:$PATH"
+                            command -v uv >/dev/null 2>&1 || { echo "uv install failed"; exit 1; }
+                            uv venv "$VENV_DIR" --python 3.12
+                            # shellcheck disable=SC1091
+                            . "$VENV_DIR/bin/activate"
+                            PYTHON_BIN="$VENV_DIR/bin/python"
+                          fi
+                          echo "Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
+                          if command -v uv >/dev/null 2>&1 && [ -n "$VENV_DIR" ] && [ -d "$VENV_DIR" ]; then
+                            uv pip install -q -r "$REPO/requirements.txt" --python "$PYTHON_BIN"
+                          else
+                            "$PYTHON_BIN" -m pip install -q -r "$REPO/requirements.txt" || "$PYTHON_BIN" -m pip install -q requests
+                          fi
                           export PYTHONPATH="$REPO"
                           WORKDIR="${HARNESS_TMP:-/tmp}/cacm-ingest-$$"
                           mkdir -p "$WORKDIR"
@@ -290,7 +318,7 @@ pipeline:
                             exit 1
                           fi
 
-                          python3 -m cacm_external_ingest.cli \
+                          "$PYTHON_BIN" -m cacm_external_ingest.cli \
                             --account-id "$ACCOUNT_ID" \
                             --api-key "$API_KEY" \
                             --provider-id "$PROVIDER_ID" \
@@ -300,7 +328,7 @@ pipeline:
                             $INPUT_ARGS
 
                           if [ -f "$WORKDIR/validation_report.json" ]; then
-                            export validation_summary=$(python3 -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
+                            export validation_summary=$("$PYTHON_BIN" -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
                           fi
                     environmentVariables: []
                     outputVariables:
