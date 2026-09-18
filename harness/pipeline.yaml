@@ -309,8 +309,8 @@ pipeline:
                         value: validation_summary
                   timeout: 30m
           environment:
-            environmentRef: local
+            environmentRef: k8ssamtest
             deployToAll: false
             infrastructureDefinitions:
-              - identifier: local
+              - identifier: lbgpock8s
         tags: {}
