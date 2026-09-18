@@ -19,12 +19,7 @@ class HarnessExternalDataClient:
         api_key: str,
         base_url: str = DEFAULT_BASE,
     ) -> None:
-        api_key = (api_key or "").strip()
-        if "\n" in api_key or "\r" in api_key:
-            raise ValueError(
-                "HARNESS_API_KEY contains a newline — export a single PAT on one line. "
-                "Example: export HARNESS_API_KEY='pat.xxx'"
-            )
+        api_key = self._normalize_api_key(api_key)
         self.account_id = account_id
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
@@ -33,6 +28,23 @@ class HarnessExternalDataClient:
                 "x-api-key": api_key,
                 "Content-Type": "application/json",
             }
+        )
+
+    @staticmethod
+    def _normalize_api_key(api_key: str) -> str:
+        """Accept a single PAT/SAT; if multiple lines were pasted, prefer pat. then sat."""
+        raw = (api_key or "").strip()
+        if not raw:
+            raise ValueError("HARNESS_API_KEY is empty")
+        lines = [ln.strip() for ln in raw.replace("\r\n", "\n").split("\n") if ln.strip()]
+        if len(lines) == 1:
+            return lines[0]
+        for prefix in ("pat.", "sat."):
+            for ln in lines:
+                if ln.startswith(prefix):
+                    return ln
+        raise ValueError(
+            "HARNESS_API_KEY contains multiple lines — keep a single pat./sat. token on one line"
         )
 
     def _url(self, path: str) -> str:

@@ -96,6 +96,11 @@ pipeline:
       description: Branch to clone
       required: false
       value: <+input>.default(main)
+    - name: file_store_ref
+      type: String
+      description: "Set to august to load CSV from Harness File Store path /cacm-ingest/TA-Identity-August2026-Snowflake.csv (no S3/AWS needed)"
+      required: false
+      value: <+input>.default()
   stages:
     - stage:
         name: Ingest
@@ -238,8 +243,10 @@ pipeline:
                           echo "Using code at: $REPO"
 
                           # Harness delegate images often lack python3 — bootstrap via uv (no root)
+                          # Use absolute path to uv; install.sh exit codes / PATH quirks are unreliable on thin images.
                           UV_HOME="${HARNESS_TMP:-/tmp}/uv-home-$$"
                           VENV_DIR=""
+                          UV_BIN=""
                           if command -v python3 >/dev/null 2>&1; then
                             PYTHON_BIN="$(command -v python3)"
                           elif command -v python >/dev/null 2>&1; then
@@ -252,30 +259,45 @@ pipeline:
                             fi
                             VENV_DIR="${HARNESS_TMP:-/tmp}/cacm-venv-$$"
                             export UV_INSTALL_DIR="$UV_HOME"
-                            curl -LsSf https://astral.sh/uv/install.sh | sh
-                            # uv install script puts binaries in UV_INSTALL_DIR (not .../bin)
-                            if [ -f "$UV_HOME/env" ]; then
+                            # install.sh may print success then exit non-zero; ignore exit, verify binary
+                            curl -LsSf https://astral.sh/uv/install.sh | sh || true
+                            if [ -x "$UV_HOME/uv" ]; then
+                              UV_BIN="$UV_HOME/uv"
+                            elif [ -x "$UV_HOME/bin/uv" ]; then
+                              UV_BIN="$UV_HOME/bin/uv"
+                            elif [ -f "$UV_HOME/env" ]; then
                               # shellcheck disable=SC1091
-                              . "$UV_HOME/env"
+                              . "$UV_HOME/env" || true
+                              UV_BIN="$(command -v uv 2>/dev/null || true)"
                             fi
-                            export PATH="$UV_HOME:$UV_HOME/bin:${HOME}/.local/bin:$PATH"
-                            command -v uv >/dev/null 2>&1 || { echo "uv install failed (uv not on PATH after install to $UV_HOME)"; ls -la "$UV_HOME" || true; exit 1; }
-                            uv venv "$VENV_DIR" --python 3.12
+                            if [ -z "$UV_BIN" ] || [ ! -x "$UV_BIN" ]; then
+                              echo "uv binary missing after install under $UV_HOME"
+                              ls -la "$UV_HOME" "$UV_HOME/bin" 2>/dev/null || true
+                              exit 1
+                            fi
+                            echo "Using uv at: $UV_BIN"
+                            "$UV_BIN" venv "$VENV_DIR" --python 3.12
                             # shellcheck disable=SC1091
                             . "$VENV_DIR/bin/activate"
                             PYTHON_BIN="$VENV_DIR/bin/python"
                           fi
                           echo "Using Python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
-                          if command -v uv >/dev/null 2>&1 && [ -n "$VENV_DIR" ] && [ -d "$VENV_DIR" ]; then
+                          if [ -n "$UV_BIN" ] && [ -x "$UV_BIN" ] && [ -n "$VENV_DIR" ] && [ -d "$VENV_DIR" ]; then
+                            "$UV_BIN" pip install -q -r "$REPO/requirements.txt" --python "$PYTHON_BIN"
+                          elif command -v uv >/dev/null 2>&1 && [ -n "$VENV_DIR" ] && [ -d "$VENV_DIR" ]; then
                             uv pip install -q -r "$REPO/requirements.txt" --python "$PYTHON_BIN"
                           else
-                            "$PYTHON_BIN" -m pip install -q -r "$REPO/requirements.txt" || "$PYTHON_BIN" -m pip install -q requests
+                            "$PYTHON_BIN" -m pip install -q -r "$REPO/requirements.txt" || "$PYTHON_BIN" -m pip install -q requests boto3
                           fi
                           export PYTHONPATH="$REPO"
                           WORKDIR="${HARNESS_TMP:-/tmp}/cacm-ingest-$$"
                           mkdir -p "$WORKDIR"
                           ACCOUNT_ID="<+account.identifier>"
-                          API_KEY='<+secrets.getValue("Sam-API-Key")>'
+                          # Prefer Secret env injection (avoids shell-quoting issues); fall back to expression
+                          API_KEY="${HARNESS_API_KEY:-}"
+                          if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
+                            API_KEY='<+secrets.getValue("Sam-API-Key")>'
+                          fi
                           PROVIDER_ID="<+pipeline.variables.provider_id>"
                           PROVIDER_TYPE="<+pipeline.variables.provider_type>"
                           INVOICE="<+pipeline.variables.invoice_period>"
@@ -283,6 +305,7 @@ pipeline:
                           INPUT_FILE="<+pipeline.variables.input_file>"
                           USE_SAMPLE="<+pipeline.variables.use_sample>"
                           VALIDATE_ONLY="<+pipeline.variables.validate_only>"
+                          FILE_STORE_REF="<+pipeline.variables.file_store_ref>"
 
                           REMOTE_URI=$(pick_first_uri \
                             "<+pipeline.variables.object_uri>" \
@@ -294,6 +317,26 @@ pipeline:
                           INPUT_ARGS=""
                           if [ "$USE_SAMPLE" = "true" ]; then
                             INPUT_ARGS="--input-file $REPO/examples/sample_focus.csv"
+                          elif [ -n "$FILE_STORE_REF" ] && [ "$FILE_STORE_REF" != "null" ]; then
+                            FS_CSV="$WORKDIR/from_file_store.csv"
+                            # fileStore.getAsBase64 path must be a literal (no nested expressions)
+                            case "$FILE_STORE_REF" in
+                              august|August|AUGUST|/cacm-ingest/TA-Identity-August2026-Snowflake.csv)
+                                echo '<+fileStore.getAsBase64("/cacm-ingest/TA-Identity-August2026-Snowflake.csv")>' | base64 -d > "$FS_CSV"
+                                ;;
+                              july|July|JULY|/cacm-ingest/TA-Identity-July2026-Snowflake.csv)
+                                echo '<+fileStore.getAsBase64("/cacm-ingest/TA-Identity-July2026-Snowflake.csv")>' | base64 -d > "$FS_CSV"
+                                ;;
+                              *)
+                                echo "Unknown file_store_ref='$FILE_STORE_REF' (use august or july)"
+                                exit 1
+                                ;;
+                            esac
+                            if [ ! -s "$FS_CSV" ]; then
+                              echo "File Store CSV empty — upload to project File Store under /cacm-ingest/"
+                              exit 1
+                            fi
+                            INPUT_ARGS="--input-file $FS_CSV"
                           elif [ -n "$REMOTE_URI" ]; then
                             INPUT_ARGS="--object-uri $REMOTE_URI"
                           elif [ -n "$INPUT_FILE" ] && [ "$INPUT_FILE" != "null" ]; then
@@ -306,7 +349,7 @@ pipeline:
                               exit 1
                             fi
                           else
-                            echo "Set use_sample=true, object_uri (or object_uri_s3/gcs/azure), or input_file"
+                            echo "Set use_sample=true, file_store_ref, object_uri (or object_uri_s3/gcs/azure), or input_file"
                             exit 1
                           fi
 
@@ -335,7 +378,10 @@ pipeline:
                           if [ -f "$WORKDIR/validation_report.json" ]; then
                             export validation_summary=$("$PYTHON_BIN" -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
                           fi
-                    environmentVariables: []
+                    environmentVariables:
+                      - name: HARNESS_API_KEY
+                        type: Secret
+                        value: Sam-API-Key
                     outputVariables:
                       - name: validation_summary
                         type: String
