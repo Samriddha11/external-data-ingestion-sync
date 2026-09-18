@@ -80,12 +80,36 @@ def _run(cmd: list[str], *, what: str) -> None:
         raise ObjectStorageError(f"{what} failed (exit {e.returncode}): {' '.join(cmd)}") from e
 
 
+def _parse_s3(uri: str) -> tuple[str, str]:
+    without = uri.strip()[len("s3://") :]
+    bucket, _, key = without.partition("/")
+    if not bucket or not key:
+        raise ObjectStorageError(f"Invalid S3 URI (need s3://bucket/key): {uri}")
+    return bucket, key
+
+
+def _download_s3(uri: str, dest: Path) -> None:
+    """Prefer AWS CLI; fall back to boto3 (works on delegates without aws)."""
+    if shutil.which("aws"):
+        _run(["aws", "s3", "cp", uri, str(dest)], what="S3 download")
+        return
+    try:
+        import boto3
+    except ImportError as e:
+        raise ObjectStorageError(
+            "S3 download requires 'aws' on PATH or pip package 'boto3' "
+            "(install via requirements.txt). Also need AWS credentials on the runner."
+        ) from e
+    bucket, key = _parse_s3(uri)
+    boto3.client("s3").download_file(bucket, key, str(dest))
+
+
 def download_object(uri: str, dest: Path) -> None:
     """Download a single object to dest (file path)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     kind = storage_kind(uri)
     if kind == "s3":
-        _run(["aws", "s3", "cp", uri, str(dest)], what="S3 download")
+        _download_s3(uri, dest)
         return
     if kind == "gcs":
         _gcs_cp(uri, str(dest), recursive=False)
@@ -131,10 +155,33 @@ def sync_prefix(prefix_uri: str, dest_dir: Path) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
     kind = storage_kind(prefix_uri)
     if kind == "s3":
-        _run(
-            ["aws", "s3", "sync", prefix_uri, str(dest_dir) + "/"],
-            what="S3 sync",
-        )
+        if shutil.which("aws"):
+            _run(
+                ["aws", "s3", "sync", prefix_uri, str(dest_dir) + "/"],
+                what="S3 sync",
+            )
+            return
+        try:
+            import boto3
+        except ImportError as e:
+            raise ObjectStorageError(
+                "S3 sync requires 'aws' on PATH or pip package 'boto3'"
+            ) from e
+        bucket, key_prefix = _parse_s3(prefix_uri.rstrip("/") + "/")
+        # key_prefix may end with / from parse of s3://bucket/prefix/
+        if not key_prefix.endswith("/") and key_prefix:
+            key_prefix = key_prefix + "/"
+        client = boto3.client("s3")
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix):
+            for obj in page.get("Contents") or []:
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                rel = key[len(key_prefix) :] if key.startswith(key_prefix) else key
+                target = dest_dir / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                client.download_file(bucket, key, str(target))
         return
     if kind == "gcs":
         _gcs_cp(prefix_uri.rstrip("/"), str(dest_dir), recursive=True)
@@ -169,21 +216,40 @@ def list_csv_uris(prefix_uri: str) -> list[str]:
 
 
 def _list_s3_csvs(prefix: str) -> list[str]:
-    proc = subprocess.run(
-        ["aws", "s3", "ls", prefix, "--recursive"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    bucket = prefix.split("/")[2]
-    uris: list[str] = []
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        key = parts[-1]
-        if key.lower().endswith(".csv"):
-            uris.append(f"s3://{bucket}/{key}")
+    if shutil.which("aws"):
+        proc = subprocess.run(
+            ["aws", "s3", "ls", prefix, "--recursive"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        bucket = prefix.split("/")[2]
+        uris: list[str] = []
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            key = parts[-1]
+            if key.lower().endswith(".csv"):
+                uris.append(f"s3://{bucket}/{key}")
+        return sorted(uris)
+    try:
+        import boto3
+    except ImportError as e:
+        raise ObjectStorageError(
+            "S3 list requires 'aws' on PATH or pip package 'boto3'"
+        ) from e
+    bucket, key_prefix = _parse_s3(prefix.rstrip("/") + "/")
+    if key_prefix and not key_prefix.endswith("/"):
+        key_prefix += "/"
+    client = boto3.client("s3")
+    uris = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix):
+        for obj in page.get("Contents") or []:
+            key = obj["Key"]
+            if key.lower().endswith(".csv"):
+                uris.append(f"s3://{bucket}/{key}")
     return sorted(uris)
 
 
