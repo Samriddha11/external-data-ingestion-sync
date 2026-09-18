@@ -120,16 +120,15 @@ The **Harness pipeline** (`local` delegate) or your laptop needs:
 
 ### 4. Where the job code lives (pick one)
 
-**Recommended — Git (same repo as the pipeline)**  
-Push this project to **GitHub / GitLab / Harness Code**. On each run the pipeline **Git Clone** step fetches `external-data-sync-job` — no S3 copy of the code.
+**Recommended — GitHub (works on K8s delegates)**  
+The Custom stage runs on your **K8s delegate**. It clones the public repo with `git clone` (no Mac path, no S3 code bucket):
 
 | Pipeline input | Example |
 |----------------|---------|
-| `git_connector_ref` | Your Git connector ID in CCMDemo (e.g. `github_ccm`) |
-| `git_repo_name` | `Samriddha11/external-data-ingestion-sync` |
+| `git_repo_url` | `https://github.com/Samriddha11/external-data-ingestion-sync.git` (default) |
 | `git_branch` | `main` |
 
-Store `harness/pipeline.yaml` in that repo and (optionally) point the Harness pipeline to **Remote** YAML in Git so pipeline + scripts stay together.
+Delegate image/pod must have **`git`**, **`python3`**, and (for CSV download) **`aws`** / `gcloud` / `az`.
 
 **Alternative — S3 / GCS / Azure prefix**  
 If you are not using Git yet, upload the project to object storage (one-time):

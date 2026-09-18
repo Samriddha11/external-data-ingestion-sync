@@ -86,19 +86,14 @@ pipeline:
       description: Absolute path to external-data-sync-job on delegate (optional if repo_object_prefix* is set)
       required: false
       value: <+input>.default()
-    - name: git_connector_ref
+    - name: git_repo_url
       type: String
-      description: Git connector ID — clone external-data-sync-job repo (preferred over S3 repo prefix)
+      description: HTTPS Git URL for external-data-ingestion-sync (cloned on the K8s delegate)
       required: false
-      value: <+input>.default()
-    - name: git_repo_name
-      type: String
-      description: Repo for Git clone (GitHub org/repo)
-      required: false
-      value: <+input>.default(Samriddha11/external-data-ingestion-sync)
+      value: <+input>.default(https://github.com/Samriddha11/external-data-ingestion-sync.git)
     - name: git_branch
       type: String
-      description: Branch to clone for external-data-sync-job
+      description: Branch to clone
       required: false
       value: <+input>.default(main)
   stages:
@@ -109,20 +104,6 @@ pipeline:
         spec:
           execution:
             steps:
-              - step:
-                  type: GitClone
-                  name: Clone external-data-sync-job
-                  identifier: Clone_external_data_sync_job
-                  spec:
-                    connectorRef: <+pipeline.variables.git_connector_ref>
-                    repoName: <+pipeline.variables.git_repo_name>
-                    build:
-                      type: branch
-                      spec:
-                        branch: <+pipeline.variables.git_branch>
-                    cloneDirectory: external-data-sync-job
-                  when:
-                    condition: <+pipeline.variables.git_connector_ref> != null && <+pipeline.variables.git_connector_ref> != "" && <+pipeline.variables.git_connector_ref> != "null"
               - step:
                   type: ShellScript
                   name: Transform Validate Ingest
@@ -215,15 +196,19 @@ pipeline:
                             REPO="$REPO_RAW"
                           fi
 
-                          for candidate in \
-                            "${HARNESS_NODE_WORKSPACE:-}/external-data-sync-job" \
-                            "./external-data-sync-job" \
-                            "${PWD}/external-data-sync-job"; do
-                            if [ -f "${candidate}/cacm_external_ingest/cli.py" ]; then
-                              REPO="${candidate}"
-                              break
+                          # Preferred on K8s: clone from GitHub (public HTTPS; no Mac path needed)
+                          GIT_URL="<+pipeline.variables.git_repo_url>"
+                          GIT_BRANCH="<+pipeline.variables.git_branch>"
+                          if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
+                            if [ -n "$GIT_URL" ] && [ "$GIT_URL" != "null" ]; then
+                              STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
+                              rm -rf "$STAGE"
+                              mkdir -p "$STAGE"
+                              echo "Cloning $GIT_URL (branch ${GIT_BRANCH:-main}) → $STAGE"
+                              git clone --depth 1 --branch "${GIT_BRANCH:-main}" "$GIT_URL" "$STAGE"
+                              REPO=$(resolve_ingest_repo "$STAGE") || REPO=""
                             fi
-                          done
+                          fi
 
                           REPO_SYNC=$(pick_first_uri \
                             "<+pipeline.variables.repo_object_prefix>" \
@@ -232,22 +217,25 @@ pipeline:
                             "<+pipeline.variables.repo_object_prefix_azure>" \
                           ) || REPO_SYNC=""
 
-                          if [ -n "$REPO_SYNC" ]; then
-                            STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
-                            rm -rf "$STAGE"
-                            mkdir -p "$STAGE"
-                            sync_cloud_prefix "$REPO_SYNC" "$STAGE"
-                            REPO=$(resolve_ingest_repo "$STAGE") || REPO=""
+                          if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
+                            if [ -n "$REPO_SYNC" ]; then
+                              STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
+                              rm -rf "$STAGE"
+                              mkdir -p "$STAGE"
+                              sync_cloud_prefix "$REPO_SYNC" "$STAGE"
+                              REPO=$(resolve_ingest_repo "$STAGE") || REPO=""
+                            fi
                           fi
 
                           if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
-                            echo "external-data-sync-job code not found on this delegate."
+                            echo "external-data-ingestion-sync code not found on this K8s delegate."
                             echo "Use ONE of:"
-                            echo "  • git_connector_ref + git_repo_name (+ git_branch) — Git Clone step"
-                            echo "  • repo_object_prefix_* (e.g. s3://bucket/external-data-sync-job/)"
-                            echo "  • repo_path (absolute path on delegate)"
+                            echo "  • git_repo_url (default: https://github.com/Samriddha11/external-data-ingestion-sync.git)"
+                            echo "  • repo_object_prefix_* (S3/GCS/Azure copy of the repo)"
+                            echo "  • repo_path (only if code is baked into the delegate image)"
                             exit 1
                           fi
+                          echo "Using code at: $REPO"
 
                           python3 -m pip install -q -r "$REPO/requirements.txt" || python3 -m pip install -q requests
                           export PYTHONPATH="$REPO"
