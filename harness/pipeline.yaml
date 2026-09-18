@@ -253,8 +253,13 @@ pipeline:
                             VENV_DIR="${HARNESS_TMP:-/tmp}/cacm-venv-$$"
                             export UV_INSTALL_DIR="$UV_HOME"
                             curl -LsSf https://astral.sh/uv/install.sh | sh
-                            export PATH="$UV_HOME/bin:${HOME}/.local/bin:$PATH"
-                            command -v uv >/dev/null 2>&1 || { echo "uv install failed"; exit 1; }
+                            # uv install script puts binaries in UV_INSTALL_DIR (not .../bin)
+                            if [ -f "$UV_HOME/env" ]; then
+                              # shellcheck disable=SC1091
+                              . "$UV_HOME/env"
+                            fi
+                            export PATH="$UV_HOME:$UV_HOME/bin:${HOME}/.local/bin:$PATH"
+                            command -v uv >/dev/null 2>&1 || { echo "uv install failed (uv not on PATH after install to $UV_HOME)"; ls -la "$UV_HOME" || true; exit 1; }
                             uv venv "$VENV_DIR" --python 3.12
                             # shellcheck disable=SC1091
                             . "$VENV_DIR/bin/activate"
