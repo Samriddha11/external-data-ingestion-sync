@@ -9,12 +9,15 @@ Automates **FOCUS CSV** validation and upload to a Harness **External Cost Data 
 1. **Cloud Auth Precheck** — detects `s3://` / `gs://` / Azure blob URIs, checks credentials and object access (AWS uses Harness secrets + boto3 if `aws` CLI is missing on the delegate).
 2. **Transform → validate → ingest** — clones this repo on a K8s delegate, downloads the CSV from object storage, maps vendor columns to FOCUS, hard-validates, then calls CCM signed-url / filesinfo / dataingestion APIs.
 
+**Architecture diagrams:** see [docs/architecture.md](docs/architecture.md).
+
 | Piece | Location |
 |--------|----------|
 | Python CLI | `cacm_external_ingest/` |
 | Pipeline (INLINE YAML you import) | `harness/pipeline.yaml` |
 | Custom webhook trigger | `harness/trigger-webhook-s3-uri.yaml` |
 | Monthly cron trigger (optional) | `harness/trigger-monthly-day5.yaml` |
+| Architecture | `docs/architecture.md` |
 
 ---
 
