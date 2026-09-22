@@ -1,220 +1,243 @@
 # CACM External Cost Ingest (`external-data-ingestion-sync`)
 
-Automates **FOCUS CSV** validation and **Harness External Data Provider** upload for Cloud & AI Cost Management.
+Automates **FOCUS CSV** validation and upload to a Harness **External Cost Data Source** (Cloud & AI Cost Management).
 
 **GitHub:** [Samriddha11/external-data-ingestion-sync](https://github.com/Samriddha11/external-data-ingestion-sync)
 
-## Connected Harness scope (implementation target)
+## What this does
 
-| Field | Value |
-|--------|--------|
-| Account ID | `SxuV0ChbRqWGSYClFlMQMQ` |
-| Org | `sam` |
-| Project | `CCMDemo` |
-| API secret (project) | `Sam-API-Key` |
+1. **Cloud Auth Precheck** — detects `s3://` / `gs://` / Azure blob URIs, checks credentials and object access (AWS uses Harness secrets + boto3 if `aws` CLI is missing on the delegate).
+2. **Transform → validate → ingest** — clones this repo on a K8s delegate, downloads the CSV from object storage, maps vendor columns to FOCUS, hard-validates, then calls CCM signed-url / filesinfo / dataingestion APIs.
 
-Pipeline: **`cacm_external_cost_ingest`** (created via Harness MCP).
+| Piece | Location |
+|--------|----------|
+| Python CLI | `cacm_external_ingest/` |
+| Pipeline (INLINE YAML you import) | `harness/pipeline.yaml` |
+| Custom webhook trigger | `harness/trigger-webhook-s3-uri.yaml` |
+| Monthly cron trigger (optional) | `harness/trigger-monthly-day5.yaml` |
 
-## Features
+---
 
-- **Provider adapters**: `custom` (pass-through), `snowflake`, `databricks` → FOCUS transform
-- **Hard validation**: required FOCUS columns, `ChargeCategory`, ISO dates, 20 MB limit
-- **Ingest**: signed URL → `filesinfo` → `dataingestion` APIs
-- **Multi-cloud object storage**: download CSVs from **AWS S3**, **GCP GCS**, or **Azure Blob** (`object_uri` / pipeline `object_uri`)
+## Install in your Harness account (customer guide)
 
-## Local run
+Follow these steps in **your** account/org/project. Replace every placeholder (`YOUR_*`) with your values.
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|--------|
+| Module | Cloud Cost Management (CCM) with **External Cost Data** enabled (`CCM_EXTERNAL_DATA_INGESTION` if gated) |
+| External Cost Data Source | Create one under **Account Settings → Cloud Cost → Cloud Integrations → External Cost Data Sources**. Copy the provider UUID from the URL (`selectedProvider=...`, without `%22` quotes). |
+| Harness API key | Project (or account) **Secret Text** — a PAT/SAT with permission to call CCM external-data APIs. |
+| Kubernetes delegate | Healthy K8s delegate + **Environment** + **Infrastructure Definition** the Custom stage can use. Pod needs outbound HTTPS (Harness, GitHub, S3/GCS/Azure, and `astral.sh` if Python is bootstrapped via `uv`). |
+| `git` on the delegate | Pipeline clones this repo by default. |
+| Object storage | CSV(s) in S3, GCS, or Azure Blob (≤ **20 MB** each). |
+
+### Step 1 — Create secrets
+
+Create **Secret Text** secrets (Harness Secret Manager is fine). Identifiers below match `harness/pipeline.yaml`; rename in YAML if you prefer different IDs.
+
+**Required — Harness API**
+
+| Identifier | Value |
+|------------|--------|
+| `Sam-API-Key` | Your Harness PAT/SAT (or change the pipeline env var to your secret id) |
+
+**Required for AWS S3** (account-scoped secrets use the `account.` prefix in the pipeline)
+
+| Identifier | Value |
+|------------|--------|
+| `sam_aws_access_key_id` | Raw **20-character** Access Key ID only (`AKIA…` / `ASIA…`) — no quotes, no `export`, no newlines |
+| `sam_aws_secret_access_key` | Secret access key only |
+| `sam_aws_session_token` | STS session token if using temporary creds; omit/clear for long-lived IAM keys |
+
+In the pipeline, refs are `account.sam_aws_*`. If you create secrets at **project** scope instead, change those refs to the bare identifier (drop `account.`).
+
+**Optional — GCP / Azure** (wire as env vars on **Cloud Auth Precheck** when needed)
+
+| Env var | Suggested secret id |
+|---------|---------------------|
+| `GCP_SA_JSON` | `gcp_sa_json` (full service account JSON) |
+| `AZURE_STORAGE_CONNECTION_STRING` | `azure_storage_connection_string` |
+| or | `azure_client_id` / `azure_client_secret` / `azure_tenant_id` |
+
+### Step 2 — Import the pipeline
+
+1. Open your project → **Pipelines** → **Create** → **Import from YAML** (or New Pipeline → YAML).
+2. Paste the contents of [`harness/pipeline.yaml`](harness/pipeline.yaml).
+3. Edit these fields for **your** account:
+
+| YAML location | Change to |
+|---------------|-----------|
+| `projectIdentifier` / `orgIdentifier` | Your org and project |
+| `environmentRef` (stage Ingest) | Your Environment identifier |
+| `infrastructureDefinitions[].identifier` | Your Infra Definition identifier |
+| `HARNESS_API_KEY` secret value | Your API key secret identifier |
+| `AWS_*` secret values | Your AWS secret identifiers (with `account.` if account-scoped) |
+| `AWS_DEFAULT_REGION` | Region of your bucket (e.g. `eu-north-1`, `us-east-1`) |
+
+4. **Save**. Pipeline identifier should remain `cacm_external_cost_ingest` (or update triggers to match).
+
+> The Custom stage does **not** deploy a service; it only needs the Environment/Infra so Harness can schedule ShellScript steps on your K8s delegate.
+
+### Step 3 — Smoke test (manual Run)
+
+**Pipeline Studio → Run** with:
+
+| Input | Example |
+|--------|---------|
+| `provider_id` | Your External Cost Data Source UUID |
+| `provider_type` | `snowflake` (or `custom` / `databricks`) |
+| `object_uri_s3` | `s3://YOUR-BUCKET/path/file.csv` |
+| `use_sample` | `false` |
+| `validate_only` | `true` first |
+| `derive_invoice_period_from_csv` | `true` (recommended) **or** set `invoice_period` |
+| `git_repo_url` | leave default (this GitHub repo) unless you forked |
+| `git_branch` | `main` |
+
+Leave other URI / File Store / `repo_object_prefix*` fields empty unless you use them.
+
+After Cloud Auth Precheck + validation succeed, re-run with `validate_only=false` to ingest.
+
+**Invoice period tip:** CCM signed-url expects **day `01` on both bounds** (e.g. June → `20260601-20260701`). The pipeline normalizes calendar month-end inputs like `20260601-20260630` automatically.
+
+### Step 4 — Custom webhook (pass S3 URI via curl)
+
+1. Import or recreate [`harness/trigger-webhook-s3-uri.yaml`](harness/trigger-webhook-s3-uri.yaml):
+   - Set `orgIdentifier`, `projectIdentifier`, `pipelineIdentifier`
+   - Set `provider_id` in `inputYaml` to **your** provider UUID
+2. **Pipelines → your pipeline → Triggers →** open **CACM S3 URI Webhook** → copy **Webhook URL**.
+
+**Minimal curl:**
 
 ```bash
-cd "/path/to/external-data-sync-job"
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-export HARNESS_API_KEY="your-key"
-python -m cacm_external_ingest.cli \
-  --account-id SxuV0ChbRqWGSYClFlMQMQ \
-  --api-key "$HARNESS_API_KEY" \
-  --provider-id "<external-data-provider-uuid>" \
-  --provider-type custom \
-  --invoice-period 20260101-20260131 \
-  --input-file examples/sample_focus.csv \
-  --validate-only
+curl -X POST '$WEBHOOK_URL' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "object_uri_s3": "s3://YOUR-BUCKET/path/monthly.csv"
+  }'
 ```
 
-Remove `--validate-only` to upload after validation.
+**Optional JSON fields:**
+
+```bash
+curl -X POST '$WEBHOOK_URL' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "object_uri_s3": "s3://YOUR-BUCKET/path/july.csv",
+    "invoice_period": "20260701-20260801",
+    "validate_only": "true"
+  }'
+```
+
+| Payload field | Pipeline input |
+|---------------|----------------|
+| `object_uri_s3` | `object_uri_s3` (required) |
+| `invoice_period` | optional |
+| `validate_only` | `"true"` / `"false"` |
+
+Defaults in the trigger YAML: `provider_type=snowflake`, `derive_invoice_period_from_csv=true`, `git_branch=main`.
+
+### Step 5 — Optional monthly cron
+
+Use [`harness/trigger-monthly-day5.yaml`](harness/trigger-monthly-day5.yaml) (UNIX cron `0 6 5 * *` UTC). Point `object_uri_s3` at a **stable** key your export job overwrites each month, and set your `provider_id`.
+
+### Step 6 — Verify
+
+**Account Settings → External Cost Data Sources →** your provider → confirm the month file appears. Perspectives update within a few minutes.
+
+Re-uploading the same file/period can hit duplicate-import errors; use a new object or remove the prior file in the UI before retesting.
+
+### Install checklist
+
+- [ ] External Cost Data Source created; `provider_id` copied  
+- [ ] API key + AWS (or GCP/Azure) secrets created; pipeline YAML refs updated  
+- [ ] Environment + Infrastructure Definition point at a working K8s delegate  
+- [ ] `AWS_DEFAULT_REGION` matches the bucket region  
+- [ ] Manual Run with `validate_only=true` then `false`  
+- [ ] Webhook trigger created; curl smoke test  
+- [ ] (Optional) Cron trigger for monthly refresh  
+
+---
+
+## Pipeline stages
+
+| Step | Purpose |
+|------|---------|
+| **Cloud Auth Precheck** | Allowlist URI; AWS STS + S3 head/list (boto3 bootstrap if needed); GCS/Azure equivalents |
+| **Transform Validate Ingest** | `git clone` this repo → pip/uv deps → download CSV → FOCUS transform → validate → (optional) CCM ingest |
 
 ## Pipeline inputs
 
 | Input | Description |
 |--------|-------------|
-| `provider_id` | External Cost Data Source UUID (CACM → Account Settings → External Cost Data Sources) |
+| `provider_id` | External Cost Data Source UUID |
 | `provider_type` | `custom`, `snowflake`, or `databricks` |
-| `invoice_period` | `YYYYMMDD-YYYYMMDD` |
-| `object_uri` | Any cloud CSV (overrides the `object_uri_*` fields below) |
-| `object_uri_s3` | AWS — `s3://bucket/path/file.csv` |
-| `object_uri_gcs` | GCP — `gs://bucket/path/file.csv` |
-| `object_uri_azure` | Azure — blob HTTPS URL or `azure://account/container/file.csv` |
-| `use_sample` | `true` to use bundled `examples/sample_focus.csv` (smoke test) |
-| `validate_only` | `true` to skip ingest API calls |
-| `repo_object_prefix` | Any cloud folder with this repo (overrides `repo_object_prefix_*`) |
-| `repo_object_prefix_s3` | AWS — `s3://bucket/external-data-sync-job/` |
-| `repo_object_prefix_gcs` | GCP — `gs://bucket/external-data-sync-job/` |
-| `repo_object_prefix_azure` | Azure — `https://acct.blob.core.windows.net/container/external-data-sync-job/` |
-| `repo_path` | Optional — absolute path to this repo on the delegate host |
+| `invoice_period` | `YYYYMMDD-YYYYMMDD` (normalized to day-01 bounds for the API when needed) |
+| `derive_invoice_period_from_csv` | `true` to derive from `BillingPeriodStart` / `BillingPeriodEnd` |
+| `object_uri` | Any cloud CSV (overrides `object_uri_*`) |
+| `object_uri_s3` | `s3://bucket/path/file.csv` |
+| `object_uri_gcs` | `gs://bucket/path/file.csv` |
+| `object_uri_azure` | Azure HTTPS or `azure://account/container/file.csv` |
+| `use_sample` | `true` → bundled `examples/sample_focus.csv` |
+| `validate_only` | `true` → skip CCM ingest APIs |
+| `git_repo_url` / `git_branch` | Source of the Python job (default: this GitHub repo / `main`) |
+| `repo_object_prefix*` / `repo_path` | Alternate ways to supply job code (object storage or path on the image) |
+| `file_store_ref` | Optional Harness File Store CSV (`july` / `august` shortcuts in the script) |
 
-## Cloud object URIs
+## Features
 
-The runner needs the matching CLI and credentials.
+- Provider adapters: `custom`, `snowflake`, `databricks` → FOCUS  
+- Hard validation: required columns, `ChargeCategory`, ISO dates, 20 MB limit  
+- Multi-cloud download: S3 / GCS / Azure  
+- Delegate-friendly: bootstraps Python via `uv` when `python3` is missing; AWS precheck via boto3 when `aws` CLI is missing  
 
-| Cloud | Example `object_uri` | CLI | Auth |
-|--------|----------------------|-----|------|
-| AWS | `s3://my-bucket/path/file.csv` | `aws` | IAM / `aws configure` / instance role |
-| GCP | `gs://my-bucket/path/file.csv` | `gcloud storage` or `gsutil` | `gcloud auth` / workload identity |
-| Azure | `https://acct.blob.core.windows.net/container/path/file.csv` or `azure://acct/container/path/file.csv` | `az` | `az login`, connection string, or managed identity |
-
-CLI flags: `--object-uri` (preferred), `--object-prefix` for batch CSVs with `--invoice-periods-json`.  
-`--s3-uri` / `--s3-prefix` remain aliases for S3.
+## Local CLI
 
 ```bash
-# GCS
-python -m cacm_external_ingest.cli ... \
-  --object-uri gs://my-bucket/cost/august.csv \
-  --provider-type snowflake --derive-invoice-period-from-csv
+git clone https://github.com/Samriddha11/external-data-ingestion-sync.git
+cd external-data-ingestion-sync
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-# Azure
-python -m cacm_external_ingest.cli ... \
-  --object-uri "https://mystorage.blob.core.windows.net/exports/TA-Identity-August2026-Snowflake.csv" \
-  --provider-type snowflake --derive-invoice-period-from-csv
-```
-
-## S3 testing (July / August)
-
-You already ingested **June** via the UI. To test **July and August** from S3 without re-uploading June:
-
-### 1. Layout in S3
-
-Use one folder and one CSV per month (FOCUS or raw + `custom` adapter), each **≤ 20 MB**:
-
-```text
-s3://<your-bucket>/cacm-external-test/
-  july-forecast.csv
-  august-forecast.csv
-```
-
-### 2. Invoice periods (must match CACM month rows)
-
-| Month | `invoice_period` |
-|--------|-------------------|
-| July 2026 | `20260701-20260731` |
-| August 2026 | `20260801-20260831` |
-
-Provider ID (from URL `selectedProvider=`): `6aaa161da729b114c9ffc862`
-
-### 3. AWS access
-
-The **Harness pipeline** (`local` delegate) or your laptop needs:
-
-- **AWS CLI** installed (`aws s3 cp` / `aws s3 ls`)
-- Credentials via env, `~/.aws/credentials`, or an **AWS connector** on the runner
-
-`CCMDemo` does not yet have an AWS connector; for pipeline runs, either add one or run the CLI on a machine with S3 access.
-
-### 4. Where the job code lives (pick one)
-
-**Recommended — GitHub (works on K8s delegates)**  
-The Custom stage runs on your **K8s delegate**. It clones the public repo with `git clone` (no Mac path, no S3 code bucket):
-
-| Pipeline input | Example |
-|----------------|---------|
-| `git_repo_url` | `https://github.com/Samriddha11/external-data-ingestion-sync.git` (default) |
-| `git_branch` | `main` |
-
-Delegate image/pod must have **`git`**, **`python3`**, and (for CSV download) **`aws`** / `gcloud` / `az`.
-
-**Alternative — S3 / GCS / Azure prefix**  
-If you are not using Git yet, upload the project to object storage (one-time):
-
-```bash
-cd "/path/to/external-data-sync-job"
-
-# AWS
-aws s3 sync . s3://YOUR-BUCKET/external-data-sync-job/ --exclude ".venv/*" --exclude ".git/*"
-
-# GCP
-gcloud storage cp -r . gs://YOUR-BUCKET/external-data-sync-job/ --exclude=".venv/**"
-
-# Azure (container must exist; blobs under prefix external-data-sync-job/)
-az storage blob upload-batch --destination YOUR_CONTAINER --source . \
-  --account-name YOUR_ACCOUNT --pattern "external-data-sync-job/*"
-```
-
-Pipeline: set **`repo_object_prefix_s3`**, **`repo_object_prefix_gcs`**, or **`repo_object_prefix_azure`** (or generic **`repo_object_prefix`**).
-
-### 5. Pipeline run (one month per execution)
-
-In [CACM External Cost Ingest](https://app.harness.io/ng/account/SxuV0ChbRqWGSYClFlMQMQ/all/orgs/sam/projects/CCMDemo/pipelines/cacm_external_cost_ingest/pipeline-studio):
-
-| Input | July run | August run |
-|--------|----------|------------|
-| `provider_id` | `6aaa161da729b114c9ffc862` | same |
-| `invoice_period` | `20260701-20260731` | `20260801-20260831` |
-| `repo_object_prefix` | `s3://YOUR-BUCKET/external-data-sync-job` | same |
-| `object_uri` | `s3://<bucket>/.../july.csv` (or `gs://` / Azure URL) | August file URI |
-| `use_sample` | `false` | `false` |
-| `validate_only` | `true` first, then `false` | same |
-
-**Smoke test:** `use_sample=true`, `validate_only=true`, `repo_object_prefix` as above, `invoice_period=20260101-20260131`, `derive_invoice_period_from_csv=false`.
-
-Run twice (July, then August). Do **not** set `use_sample=true` when using real `object_uri`.
-
-### 6. Local / batch CLI (both months in one command)
-
-```bash
-export HARNESS_API_KEY="..."
-export BUCKET=your-bucket
-# Edit URIs in scripts/s3-july-august.example.sh then:
-VALIDATE_ONLY=true bash scripts/s3-july-august.example.sh
-```
-
-Or single file:
-
-```bash
+export HARNESS_API_KEY="your-key"
 python -m cacm_external_ingest.cli \
-  --account-id SxuV0ChbRqWGSYClFlMQMQ \
+  --account-id YOUR_ACCOUNT_ID \
   --api-key "$HARNESS_API_KEY" \
-  --provider-id 6aaa161da729b114c9ffc862 \
-  --provider-type custom \
-  --invoice-period 20260701-20260731 \
-  --s3-uri s3://your-bucket/cacm-external-test/july-forecast.csv \
+  --provider-id YOUR_PROVIDER_UUID \
+  --provider-type snowflake \
+  --object-uri s3://YOUR-BUCKET/path/file.csv \
+  --derive-invoice-period-from-csv \
   --validate-only
 ```
 
-### 7. Monthly schedule (5th of each month)
+Remove `--validate-only` to ingest. Use `--object-uri` with `gs://` or Azure URLs the same way.
 
-**Cron (UNIX, UTC):** `0 6 5 * *` → 06:00 UTC on day 5 (~11:30 AM IST).
+## Repo layout (Harness files)
 
-**Option A — UI**
+```text
+harness/
+  pipeline.yaml                 # Main Custom-stage pipeline
+  trigger-webhook-s3-uri.yaml   # Custom webhook (curl → object_uri_s3)
+  trigger-monthly-day5.yaml     # Optional cron
+  input-set-monthly-ingest.yaml # Optional input set
+```
 
-1. Open [CACM External Cost Ingest](https://app.harness.io/ng/account/SxuV0ChbRqWGSYClFlMQMQ/all/orgs/sam/projects/CCMDemo/pipelines/cacm_external_cost_ingest/pipeline-studio) → **Triggers** → **New Trigger** → **Cron**.
-2. Schedule: **Custom** → **UNIX** → `0 6 5 * *` (adjust hour for your timezone; Harness default is UTC).
-3. **Pipeline Input:** set `provider_id`, `repo_object_prefix_*`, and `object_uri_*` (see `harness/trigger-monthly-day5.yaml`).
-4. **Create Trigger** → use **Run** once on the trigger to test before waiting for the 5th.
+## Reference demo account (maintainers)
 
-**Option B — YAML in repo**
+| Field | Value |
+|--------|--------|
+| Account ID | `SxuV0ChbRqWGSYClFlMQMQ` |
+| Org / Project | `sam` / `CCMDemo` |
+| Pipeline | `cacm_external_cost_ingest` |
+| API secret | `Sam-API-Key` |
+| AWS secrets | `account.sam_aws_access_key_id` / `_secret_access_key` / `_session_token` |
+| Env / Infra | `k8ssamtest` / `lbgpock8s` |
 
-- Trigger template: `harness/trigger-monthly-day5.yaml`
-- Optional input set: `harness/input-set-monthly-ingest.yaml`
+Customers should **not** copy these IDs into their install — use Step 2 substitutions above.
 
-**Monthly CSV naming:** Cron inputs are static. Use a stable object key each month (e.g. `s3://bucket/incoming/monthly-snowflake.csv` overwritten by your export job) or update the trigger input / input set when the path changes. Harness does not support dynamic expressions in trigger pipeline variables for cron.
+## Prerequisites (summary)
 
-For GCP/Azure scheduled runs, set `repo_object_prefix_gcs` / `repo_object_prefix_azure` and `object_uri_gcs` / `object_uri_azure` in the trigger input instead of the S3 fields.
-
-### 8. Verify in Harness
-
-After ingest (`validate_only=false`), check **External Cost Data Sources** → your provider → **June / July / August** rows should show new files; Perspectives update within a few minutes.
-
-**Note:** Re-uploading the same file/period may hit duplicate-import errors; use new files or delete the prior file in UI before retesting.
-
-## Prerequisites
-
-- Feature flag `CCM_EXTERNAL_DATA_INGESTION` enabled on the account
-- At least one **External Cost Data Source** created in CACM UI
+- Feature flag / entitlement for external data ingest on the account  
+- At least one **External Cost Data Source** in the CACM UI  
+- Delegate that can reach Harness, GitHub (or your fork), and the object store  

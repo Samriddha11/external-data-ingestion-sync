@@ -111,6 +111,431 @@ pipeline:
             steps:
               - step:
                   type: ShellScript
+                  name: Cloud Auth Precheck
+                  identifier: Cloud_Auth_Precheck
+                  spec:
+                    shell: Bash
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -euo pipefail
+
+                          pick_first_uri() {
+                            for u in "$@"; do
+                              if [ -n "$u" ] && [ "$u" != "null" ]; then
+                                printf '%s\n' "$u"
+                                return 0
+                              fi
+                            done
+                            return 1
+                          }
+
+                          # Reject shell metacharacters / non-allowlisted schemes (Harness may substitute inputs into the script).
+                          assert_safe_cloud_uri() {
+                            local uri="$1"
+                            if [[ "$uri" =~ [\$\`\;\|\&\<\>\(\)\{\}\"\'\\[:space:]] ]]; then
+                              echo "FAIL: cloud URI contains forbidden characters"
+                              exit 1
+                            fi
+                            if [[ "$uri" =~ ^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^gs://[a-z0-9][a-z0-9._-]{1,220}/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^azure://[A-Za-z0-9-]+/[A-Za-z0-9-]+/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^https://[A-Za-z0-9-]+\.blob\.core\.windows\.net/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            echo "FAIL: cloud URI failed allowlist validation"
+                            exit 1
+                          }
+
+                          detect_cloud() {
+                            local uri="$1"
+                            case "$uri" in
+                              s3://*) printf '%s\n' "aws" ;;
+                              gs://*) printf '%s\n' "gcp" ;;
+                              azure://*|https://*blob.core.windows.net/*) printf '%s\n' "azure" ;;
+                              *) printf '%s\n' "unknown" ;;
+                            esac
+                          }
+
+                          bucket_from_s3() {
+                            local uri="$1"
+                            local rest="${uri#s3://}"
+                            printf '%s\n' "${rest%%/*}"
+                          }
+
+                          prefix_from_s3() {
+                            local uri="$1"
+                            local rest="${uri#s3://}"
+                            local path="${rest#*/}"
+                            if [ "$path" = "$rest" ]; then printf '\n'; else printf '%s\n' "$path"; fi
+                          }
+
+                          bucket_from_gs() {
+                            local uri="$1"
+                            local rest="${uri#gs://}"
+                            printf '%s\n' "${rest%%/*}"
+                          }
+
+                          parse_azure() {
+                            local uri="$1"
+                            if [[ "$uri" == azure://* ]]; then
+                              local stripped="${uri#azure://}"
+                              AZ_ACCOUNT="${stripped%%/*}"
+                              local rest="${stripped#*/}"
+                              AZ_CONTAINER="${rest%%/*}"
+                              AZ_PREFIX="${rest#*/}"
+                              if [ "$AZ_PREFIX" = "$AZ_CONTAINER" ]; then AZ_PREFIX=""; fi
+                            elif [[ "$uri" == https://*blob.core.windows.net/* ]]; then
+                              local host pathpart
+                              host=$(printf '%s' "$uri" | sed -E 's|https://([^/]+)/.*|\1|')
+                              pathpart=$(printf '%s' "$uri" | sed -E 's|https://[^/]+/||' | sed 's|/*$||')
+                              AZ_ACCOUNT="${host%%.blob.core.windows.net}"
+                              AZ_CONTAINER="${pathpart%%/*}"
+                              AZ_PREFIX="${pathpart#*/}"
+                              if [ "$AZ_PREFIX" = "$AZ_CONTAINER" ]; then AZ_PREFIX=""; fi
+                            else
+                              return 1
+                            fi
+                          }
+
+                          ensure_python_for_aws() {
+                            # Thin delegate images often lack aws CLI and python3 — bootstrap like the ingest step.
+                            if [ -n "${AWS_PRECHECK_PYTHON:-}" ] && [ -x "${AWS_PRECHECK_PYTHON}" ]; then
+                              return 0
+                            fi
+                            local uv_home venv_dir uv_bin
+                            if command -v python3 >/dev/null 2>&1; then
+                              AWS_PRECHECK_PYTHON="$(command -v python3)"
+                            elif command -v python >/dev/null 2>&1; then
+                              AWS_PRECHECK_PYTHON="$(command -v python)"
+                            else
+                              if ! command -v curl >/dev/null 2>&1; then
+                                echo "FAIL: need curl to bootstrap Python (no aws CLI / python on delegate)"
+                                exit 1
+                              fi
+                              uv_home="${HARNESS_TMP:-/tmp}/uv-aws-precheck-$$"
+                              venv_dir="${HARNESS_TMP:-/tmp}/cacm-aws-precheck-venv-$$"
+                              export UV_INSTALL_DIR="$uv_home"
+                              curl -LsSf https://astral.sh/uv/install.sh | sh || true
+                              if [ -x "$uv_home/uv" ]; then
+                                uv_bin="$uv_home/uv"
+                              elif [ -x "$uv_home/bin/uv" ]; then
+                                uv_bin="$uv_home/bin/uv"
+                              else
+                                echo "FAIL: uv install failed; cannot bootstrap AWS precheck without aws CLI"
+                                exit 1
+                              fi
+                              "$uv_bin" venv "$venv_dir" --python 3.12
+                              # shellcheck disable=SC1091
+                              . "$venv_dir/bin/activate"
+                              AWS_PRECHECK_PYTHON="$venv_dir/bin/python"
+                              "$uv_bin" pip install -q boto3 --python "$AWS_PRECHECK_PYTHON"
+                              export AWS_PRECHECK_PYTHON
+                              return 0
+                            fi
+                            if ! "$AWS_PRECHECK_PYTHON" -c 'import boto3' 2>/dev/null; then
+                              if command -v uv >/dev/null 2>&1; then
+                                uv pip install -q boto3 --python "$AWS_PRECHECK_PYTHON" 2>/dev/null \
+                                  || "$AWS_PRECHECK_PYTHON" -m pip install -q boto3
+                              else
+                                "$AWS_PRECHECK_PYTHON" -m pip install -q boto3
+                              fi
+                            fi
+                            export AWS_PRECHECK_PYTHON
+                          }
+
+                          precheck_aws_boto3() {
+                            local uri="$1"
+                            ensure_python_for_aws
+                            echo "Using Python/boto3 for AWS precheck (aws CLI not on PATH)"
+                            local pyfile="${HARNESS_TMP:-/tmp}/aws_precheck_$$.py"
+                            # Do not use bash heredoc here — YAML indent breaks the closing delimiter.
+                            printf '%s\n' \
+                              'import os, sys' \
+                              'import boto3' \
+                              'from botocore.exceptions import ClientError, BotoCoreError' \
+                              '' \
+                              'uri = os.environ["PRECHECK_S3_URI"].strip()' \
+                              'if not uri.startswith("s3://"):' \
+                              '    print("FAIL: not an s3 URI", file=sys.stderr)' \
+                              '    sys.exit(1)' \
+                              'rest = uri[5:]' \
+                              'bucket, _, key = rest.partition("/")' \
+                              'if not bucket:' \
+                              '    print("FAIL: invalid s3 URI", file=sys.stderr)' \
+                              '    sys.exit(1)' \
+                              'sts = boto3.client("sts")' \
+                              'ident = sts.get_caller_identity()' \
+                              'print("Caller identity:", {"Account": ident.get("Account"), "Arn": ident.get("Arn"), "UserId": ident.get("UserId")})' \
+                              's3 = boto3.client("s3")' \
+                              'try:' \
+                              '    if key and key.lower().endswith(".csv"):' \
+                              '        s3.head_object(Bucket=bucket, Key=key)' \
+                              '        print("OK: can read object in bucket=%s" % bucket)' \
+                              '    else:' \
+                              '        s3.list_objects_v2(Bucket=bucket, Prefix=key or "", MaxKeys=3)' \
+                              '        print("OK: can list objects in bucket=%s" % bucket)' \
+                              'except (ClientError, BotoCoreError) as e:' \
+                              '    print("FAIL: S3 access error: %s" % e, file=sys.stderr)' \
+                              '    sys.exit(1)' \
+                              > "$pyfile"
+                            PRECHECK_S3_URI="$uri" "$AWS_PRECHECK_PYTHON" "$pyfile"
+                            rm -f "$pyfile"
+                          }
+
+                          sanitize_aws_env() {
+                            # Harness secrets often include trailing newlines/quotes; a literal "null"
+                            # session token breaks SigV4 (IncompleteSignature / missing equal-sign).
+                            strip_cred() {
+                              printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+                            }
+                            if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ "${AWS_ACCESS_KEY_ID}" != "null" ]; then
+                              export AWS_ACCESS_KEY_ID
+                              AWS_ACCESS_KEY_ID="$(strip_cred "$AWS_ACCESS_KEY_ID")"
+                            fi
+                            if [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && [ "${AWS_SECRET_ACCESS_KEY}" != "null" ]; then
+                              export AWS_SECRET_ACCESS_KEY
+                              AWS_SECRET_ACCESS_KEY="$(strip_cred "$AWS_SECRET_ACCESS_KEY")"
+                            fi
+                            if [ -n "${AWS_SESSION_TOKEN:-}" ] && [ "${AWS_SESSION_TOKEN}" != "null" ]; then
+                              export AWS_SESSION_TOKEN
+                              AWS_SESSION_TOKEN="$(strip_cred "$AWS_SESSION_TOKEN")"
+                            else
+                              unset AWS_SESSION_TOKEN || true
+                            fi
+                            if [ -n "${AWS_DEFAULT_REGION:-}" ] && [ "${AWS_DEFAULT_REGION}" != "null" ]; then
+                              export AWS_DEFAULT_REGION
+                              AWS_DEFAULT_REGION="$(strip_cred "$AWS_DEFAULT_REGION")"
+                            fi
+                            echo "AWS env sanitized: key_id_len=${#AWS_ACCESS_KEY_ID} secret_len=${#AWS_SECRET_ACCESS_KEY} session_token=$([ -n "${AWS_SESSION_TOKEN:-}" ] && echo set || echo unset) region=${AWS_DEFAULT_REGION:-}"
+                            # Valid IAM/STS access key IDs are exactly 20 chars (AKIA... / ASIA...).
+                            if [[ ! "${AWS_ACCESS_KEY_ID}" =~ ^A(KIA|SIA)[A-Z0-9]{16}$ ]]; then
+                              if [[ "${AWS_ACCESS_KEY_ID}" =~ (A(KIA|SIA)[A-Z0-9]{16}) ]]; then
+                                AWS_ACCESS_KEY_ID="${BASH_REMATCH[1]}"
+                                export AWS_ACCESS_KEY_ID
+                                echo "Extracted Access Key ID from pasted value (now len=${#AWS_ACCESS_KEY_ID})"
+                              else
+                                echo "FAIL: AWS_ACCESS_KEY_ID is not a valid AKIA/ASIA key (len=${#AWS_ACCESS_KEY_ID})."
+                                echo "Update account.sam_aws_access_key_id to the raw 20-char Access Key ID only."
+                                exit 1
+                              fi
+                            fi
+                          }
+
+                          precheck_aws() {
+                            local uri="$1"
+                            echo "=== AWS auth + S3 connectivity ==="
+                            sanitize_aws_env
+                            if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+                              echo "FAIL: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set."
+                              echo "Wire Harness secrets account.sam_aws_access_key_id and account.sam_aws_secret_access_key as env vars on this step."
+                              exit 1
+                            fi
+                            if [ -z "${AWS_SESSION_TOKEN:-}" ]; then
+                              echo "WARN: AWS_SESSION_TOKEN unset — OK for long-lived keys; required for STS temporary creds."
+                            fi
+                            if ! command -v aws >/dev/null 2>&1; then
+                              echo "aws CLI not on PATH — bootstrapping boto3 precheck"
+                              precheck_aws_boto3 "$uri"
+                              return 0
+                            fi
+                            echo "aws CLI: $(aws --version 2>&1 | head -1)"
+                            echo "Caller identity:"
+                            aws sts get-caller-identity
+                            local bucket prefix
+                            bucket=$(bucket_from_s3 "$uri")
+                            prefix=$(prefix_from_s3 "$uri")
+                            # Use discrete --bucket/--key/--prefix flags (never interpolate URI into a new shell word).
+                            if [ -n "$prefix" ] && [[ "$uri" == *.csv ]]; then
+                              aws s3api head-object --bucket "$bucket" --key "$prefix" >/dev/null
+                              echo "OK: can read object in bucket=$bucket"
+                            else
+                              aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix" --max-items 3 >/dev/null
+                              echo "OK: can list objects in bucket=$bucket"
+                            fi
+                          }
+
+                          precheck_gcp() {
+                            local uri="$1"
+                            echo "=== GCP auth + GCS connectivity ==="
+                            if ! command -v gcloud >/dev/null 2>&1 && ! command -v gsutil >/dev/null 2>&1; then
+                              echo "FAIL: gcloud/gsutil not found on delegate."
+                              exit 1
+                            fi
+                            if [ -n "${GCP_SA_JSON:-}" ] && [ "$GCP_SA_JSON" != "null" ]; then
+                              KEY_FILE="${HARNESS_TMP:-/tmp}/gcp-sa-$$.json"
+                              umask 077
+                              printf '%s' "$GCP_SA_JSON" > "$KEY_FILE"
+                              chmod 600 "$KEY_FILE"
+                              trap 'rm -f "$KEY_FILE"' EXIT
+                              export GOOGLE_APPLICATION_CREDENTIALS="$KEY_FILE"
+                              if command -v gcloud >/dev/null 2>&1; then
+                                gcloud auth activate-service-account --key-file="$KEY_FILE" --quiet
+                              fi
+                              echo "Using GCP service account key from Harness secret."
+                            else
+                              echo "No GCP_SA_JSON secret — using delegate ADC / workload identity."
+                            fi
+                            if command -v gcloud >/dev/null 2>&1; then
+                              gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1 || true
+                            fi
+                            local bucket
+                            bucket=$(bucket_from_gs "$uri")
+                            echo "GCS check for allowlisted URI (bucket=$bucket)"
+                            if command -v gcloud >/dev/null 2>&1; then
+                              gcloud storage ls -- "$uri" >/dev/null 2>&1 \
+                                || gcloud storage ls -- "gs://${bucket}/" >/dev/null
+                            else
+                              gsutil ls -- "$uri" >/dev/null 2>&1 || gsutil ls -- "gs://${bucket}/" >/dev/null
+                            fi
+                            echo "OK: GCS reachable"
+                          }
+
+                          precheck_azure() {
+                            local uri="$1"
+                            echo "=== Azure auth + Blob connectivity ==="
+                            if ! command -v az >/dev/null 2>&1; then
+                              echo "FAIL: az CLI not found on delegate."
+                              exit 1
+                            fi
+                            if [ -n "${AZURE_STORAGE_CONNECTION_STRING:-}" ] && [ "$AZURE_STORAGE_CONNECTION_STRING" != "null" ]; then
+                              export AZURE_STORAGE_CONNECTION_STRING
+                              echo "Using AZURE_STORAGE_CONNECTION_STRING from Harness secret."
+                            elif [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ] && [ -n "${AZURE_TENANT_ID:-}" ]; then
+                              az login --service-principal \
+                                -u "$AZURE_CLIENT_ID" \
+                                -p "$AZURE_CLIENT_SECRET" \
+                                --tenant "$AZURE_TENANT_ID" \
+                                --output none
+                              echo "Logged in with Azure service principal from Harness secrets."
+                            else
+                              echo "No Azure secrets set — using delegate managed identity / existing az login."
+                              az account show >/dev/null 2>&1 || {
+                                echo "FAIL: az not authenticated. Create secrets azure_storage_connection_string"
+                                echo "  or azure_client_id + azure_client_secret + azure_tenant_id and wire them on this step."
+                                exit 1
+                              }
+                            fi
+                            parse_azure "$uri" || { echo "FAIL: could not parse Azure URI"; exit 1; }
+                            echo "Blob check: account=$AZ_ACCOUNT container=$AZ_CONTAINER"
+                            local -a list_cmd=(az storage blob list --account-name "$AZ_ACCOUNT" --container-name "$AZ_CONTAINER" --output table --num-results 3)
+                            if [ -n "${AZURE_STORAGE_CONNECTION_STRING:-}" ] && [ "$AZURE_STORAGE_CONNECTION_STRING" != "null" ]; then
+                              list_cmd+=(--connection-string "$AZURE_STORAGE_CONNECTION_STRING")
+                            fi
+                            if [ -n "$AZ_PREFIX" ]; then
+                              list_cmd+=(--prefix "$AZ_PREFIX")
+                            fi
+                            "${list_cmd[@]}" >/dev/null
+                            echo "OK: Azure Blob reachable"
+                          }
+
+                          USE_SAMPLE="${PIPELINE_USE_SAMPLE:-}"
+                          FILE_STORE_REF="${PIPELINE_FILE_STORE_REF:-}"
+
+                          CLOUD_URI=$(pick_first_uri \
+                            "${PIPELINE_OBJECT_URI:-}" \
+                            "${PIPELINE_OBJECT_URI_S3:-}" \
+                            "${PIPELINE_OBJECT_URI_GCS:-}" \
+                            "${PIPELINE_OBJECT_URI_AZURE:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_S3:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_GCS:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_AZURE:-}" \
+                          ) || CLOUD_URI=""
+
+                          if [ "$USE_SAMPLE" = "true" ] || { [ -n "$FILE_STORE_REF" ] && [ "$FILE_STORE_REF" != "null" ]; }; then
+                            if [ -z "$CLOUD_URI" ]; then
+                              echo "No cloud object URI — using sample/File Store. Skipping cloud auth precheck."
+                              export cloud_precheck_summary='{"cloud":"none","status":"skipped","reason":"sample_or_file_store"}'
+                              exit 0
+                            fi
+                          fi
+
+                          if [ -z "$CLOUD_URI" ]; then
+                            echo "No object_uri / repo_object_prefix set — skipping cloud auth precheck."
+                            export cloud_precheck_summary='{"cloud":"none","status":"skipped","reason":"no_uri"}'
+                            exit 0
+                          fi
+
+                          assert_safe_cloud_uri "$CLOUD_URI"
+                          CLOUD=$(detect_cloud "$CLOUD_URI")
+                          echo "Detected cloud=$CLOUD (URI allowlisted)"
+
+                          case "$CLOUD" in
+                            aws) precheck_aws "$CLOUD_URI" ;;
+                            gcp) precheck_gcp "$CLOUD_URI" ;;
+                            azure) precheck_azure "$CLOUD_URI" ;;
+                            *)
+                              echo "FAIL: unsupported URI scheme after allowlist"
+                              exit 1
+                              ;;
+                          esac
+
+                          # Build JSON via Python so URI is never re-parsed by the shell.
+                          export cloud_precheck_summary
+                          cloud_precheck_summary="$(
+                            CLOUD="$CLOUD" CLOUD_URI="$CLOUD_URI" python3 -c 'import json,os; print(json.dumps({"cloud":os.environ["CLOUD"],"status":"ok","uri":os.environ["CLOUD_URI"]}))' \
+                              2>/dev/null \
+                            || CLOUD="$CLOUD" CLOUD_URI="$CLOUD_URI" python -c 'import json,os; print(json.dumps({"cloud":os.environ["CLOUD"],"status":"ok","uri":os.environ["CLOUD_URI"]}))'
+                          )"
+                          echo "Cloud auth precheck passed."
+                    environmentVariables:
+                      - name: AWS_ACCESS_KEY_ID
+                        type: Secret
+                        value: account.sam_aws_access_key_id
+                      - name: AWS_SECRET_ACCESS_KEY
+                        type: Secret
+                        value: account.sam_aws_secret_access_key
+                      - name: AWS_SESSION_TOKEN
+                        type: Secret
+                        value: account.sam_aws_session_token
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: eu-north-1
+                      - name: PIPELINE_USE_SAMPLE
+                        type: String
+                        value: <+pipeline.variables.use_sample>
+                      - name: PIPELINE_FILE_STORE_REF
+                        type: String
+                        value: <+pipeline.variables.file_store_ref>
+                      - name: PIPELINE_OBJECT_URI
+                        type: String
+                        value: <+pipeline.variables.object_uri>
+                      - name: PIPELINE_OBJECT_URI_S3
+                        type: String
+                        value: <+pipeline.variables.object_uri_s3>
+                      - name: PIPELINE_OBJECT_URI_GCS
+                        type: String
+                        value: <+pipeline.variables.object_uri_gcs>
+                      - name: PIPELINE_OBJECT_URI_AZURE
+                        type: String
+                        value: <+pipeline.variables.object_uri_azure>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_S3
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_s3>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_GCS
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_gcs>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_AZURE
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_azure>
+                    outputVariables:
+                      - name: cloud_precheck_summary
+                        type: String
+                        value: cloud_precheck_summary
+                  timeout: 10m
+              - step:
+                  type: ShellScript
                   name: Transform Validate Ingest
                   identifier: Transform_Validate_Ingest
                   spec:
@@ -168,17 +593,18 @@ pipeline:
                             local uri="$1" dest="$2"
                             case "$uri" in
                               s3://*)
-                                aws s3 sync "${uri%/}/" "$dest/" --exclude ".venv/*" --exclude "*/.venv/*"
+                                # URI already allowlisted; pass as discrete sync args.
+                                aws s3 sync "${uri%/}/" "${dest}/" --exclude ".venv/*" --exclude "*/.venv/*"
                                 ;;
                               gs://*)
-                                gcloud storage cp -r "${uri%/}" "$dest/" --exclude=".venv/**" \
-                                  || gsutil -m cp -r "${uri%/}" "$dest/"
+                                gcloud storage cp -r "${uri%/}" "${dest}/" --exclude=".venv/**" \
+                                  || gsutil -m cp -r "${uri%/}" "${dest}/"
                                 ;;
                               azure://*|https://*blob.core.windows.net/*)
                                 sync_azure_prefix "$uri" "$dest"
                                 ;;
                               *)
-                                echo "Unsupported repo prefix (use s3://, gs://, or Azure blob URL): $uri"
+                                echo "Unsupported repo prefix (use s3://, gs://, or Azure blob URL)"
                                 return 1
                                 ;;
                             esac
@@ -187,43 +613,66 @@ pipeline:
                           pick_first_uri() {
                             for u in "$@"; do
                               if [ -n "$u" ] && [ "$u" != "null" ]; then
-                                echo "$u"
+                                printf '%s\n' "$u"
                                 return 0
                               fi
                             done
                             return 1
                           }
 
+                          assert_safe_cloud_uri() {
+                            local uri="$1"
+                            if [[ "$uri" =~ [\$\`\;\|\&\<\>\(\)\{\}\"\'\\[:space:]] ]]; then
+                              echo "FAIL: cloud URI contains forbidden characters"
+                              exit 1
+                            fi
+                            if [[ "$uri" =~ ^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^gs://[a-z0-9][a-z0-9._-]{1,220}/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^azure://[A-Za-z0-9-]+/[A-Za-z0-9-]+/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            if [[ "$uri" =~ ^https://[A-Za-z0-9-]+\.blob\.core\.windows\.net/[A-Za-z0-9._/-]+$ ]]; then
+                              return 0
+                            fi
+                            echo "FAIL: cloud URI failed allowlist validation"
+                            exit 1
+                          }
+
                           REPO=""
-                          REPO_RAW="<+pipeline.variables.repo_path>"
+                          REPO_RAW="${PIPELINE_REPO_PATH:-}"
                           REPO_RAW="${REPO_RAW//\"/}"
                           if [ "$REPO_RAW" != "null" ] && [ -n "$REPO_RAW" ]; then
                             REPO="$REPO_RAW"
                           fi
 
                           # Preferred on K8s: clone from GitHub (public HTTPS; no Mac path needed)
-                          GIT_URL="<+pipeline.variables.git_repo_url>"
-                          GIT_BRANCH="<+pipeline.variables.git_branch>"
+                          GIT_URL="${PIPELINE_GIT_REPO_URL:-}"
+                          GIT_BRANCH="${PIPELINE_GIT_BRANCH:-}"
                           if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
                             if [ -n "$GIT_URL" ] && [ "$GIT_URL" != "null" ]; then
                               STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
                               rm -rf "$STAGE"
                               mkdir -p "$STAGE"
-                              echo "Cloning $GIT_URL (branch ${GIT_BRANCH:-main}) → $STAGE"
-                              git clone --depth 1 --branch "${GIT_BRANCH:-main}" "$GIT_URL" "$STAGE"
+                              echo "Cloning git repo (branch ${GIT_BRANCH:-main}) → $STAGE"
+                              git clone --depth 1 --branch "${GIT_BRANCH:-main}" -- "$GIT_URL" "$STAGE"
                               REPO=$(resolve_ingest_repo "$STAGE") || REPO=""
                             fi
                           fi
 
                           REPO_SYNC=$(pick_first_uri \
-                            "<+pipeline.variables.repo_object_prefix>" \
-                            "<+pipeline.variables.repo_object_prefix_s3>" \
-                            "<+pipeline.variables.repo_object_prefix_gcs>" \
-                            "<+pipeline.variables.repo_object_prefix_azure>" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_S3:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_GCS:-}" \
+                            "${PIPELINE_REPO_OBJECT_PREFIX_AZURE:-}" \
                           ) || REPO_SYNC=""
 
                           if [ -z "$REPO" ] || [ ! -f "$REPO/cacm_external_ingest/cli.py" ]; then
                             if [ -n "$REPO_SYNC" ]; then
+                              assert_safe_cloud_uri "$REPO_SYNC"
                               STAGE="${HARNESS_TMP:-/tmp}/external-data-sync-job"
                               rm -rf "$STAGE"
                               mkdir -p "$STAGE"
@@ -292,31 +741,41 @@ pipeline:
                           export PYTHONPATH="$REPO"
                           WORKDIR="${HARNESS_TMP:-/tmp}/cacm-ingest-$$"
                           mkdir -p "$WORKDIR"
-                          ACCOUNT_ID="<+account.identifier>"
+                          ACCOUNT_ID="${PIPELINE_ACCOUNT_ID:-}"
                           # Prefer Secret env injection (avoids shell-quoting issues); fall back to expression
                           API_KEY="${HARNESS_API_KEY:-}"
                           if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
                             API_KEY='<+secrets.getValue("Sam-API-Key")>'
                           fi
-                          PROVIDER_ID="<+pipeline.variables.provider_id>"
-                          PROVIDER_TYPE="<+pipeline.variables.provider_type>"
-                          INVOICE="<+pipeline.variables.invoice_period>"
-                          DERIVE="<+pipeline.variables.derive_invoice_period_from_csv>"
-                          INPUT_FILE="<+pipeline.variables.input_file>"
-                          USE_SAMPLE="<+pipeline.variables.use_sample>"
-                          VALIDATE_ONLY="<+pipeline.variables.validate_only>"
-                          FILE_STORE_REF="<+pipeline.variables.file_store_ref>"
+                          PROVIDER_ID="${PIPELINE_PROVIDER_ID:-}"
+                          PROVIDER_TYPE="${PIPELINE_PROVIDER_TYPE:-}"
+                          INVOICE="${PIPELINE_INVOICE_PERIOD:-}"
+                          DERIVE="${PIPELINE_DERIVE_INVOICE:-}"
+                          INPUT_FILE="${PIPELINE_INPUT_FILE:-}"
+                          USE_SAMPLE="${PIPELINE_USE_SAMPLE:-}"
+                          VALIDATE_ONLY="${PIPELINE_VALIDATE_ONLY:-}"
+                          FILE_STORE_REF="${PIPELINE_FILE_STORE_REF:-}"
 
                           REMOTE_URI=$(pick_first_uri \
-                            "<+pipeline.variables.object_uri>" \
-                            "<+pipeline.variables.object_uri_s3>" \
-                            "<+pipeline.variables.object_uri_gcs>" \
-                            "<+pipeline.variables.object_uri_azure>" \
+                            "${PIPELINE_OBJECT_URI:-}" \
+                            "${PIPELINE_OBJECT_URI_S3:-}" \
+                            "${PIPELINE_OBJECT_URI_GCS:-}" \
+                            "${PIPELINE_OBJECT_URI_AZURE:-}" \
                           ) || REMOTE_URI=""
 
-                          INPUT_ARGS=""
+                          # Build CLI argv as an array — never unquoted string expansion (blocks --base-url injection).
+                          CLI_ARGS=(
+                            -m cacm_external_ingest.cli
+                            --account-id "$ACCOUNT_ID"
+                            --api-key "$API_KEY"
+                            --provider-id "$PROVIDER_ID"
+                            --provider-type "$PROVIDER_TYPE"
+                            --report-out "$WORKDIR/validation_report.json"
+                            --base-url "https://app.harness.io"
+                          )
+
                           if [ "$USE_SAMPLE" = "true" ]; then
-                            INPUT_ARGS="--input-file $REPO/examples/sample_focus.csv"
+                            CLI_ARGS+=(--input-file "$REPO/examples/sample_focus.csv")
                           elif [ -n "$FILE_STORE_REF" ] && [ "$FILE_STORE_REF" != "null" ]; then
                             FS_CSV="$WORKDIR/from_file_store.csv"
                             # fileStore.getAsBase64 path must be a literal (no nested expressions)
@@ -336,14 +795,15 @@ pipeline:
                               echo "File Store CSV empty — upload to project File Store under /cacm-ingest/"
                               exit 1
                             fi
-                            INPUT_ARGS="--input-file $FS_CSV"
+                            CLI_ARGS+=(--input-file "$FS_CSV")
                           elif [ -n "$REMOTE_URI" ]; then
-                            INPUT_ARGS="--object-uri $REMOTE_URI"
+                            assert_safe_cloud_uri "$REMOTE_URI"
+                            CLI_ARGS+=(--object-uri "$REMOTE_URI")
                           elif [ -n "$INPUT_FILE" ] && [ "$INPUT_FILE" != "null" ]; then
                             if [ -f "$INPUT_FILE" ]; then
-                              INPUT_ARGS="--input-file $INPUT_FILE"
+                              CLI_ARGS+=(--input-file "$INPUT_FILE")
                             elif [ -f "$REPO/$INPUT_FILE" ]; then
-                              INPUT_ARGS="--input-file $REPO/$INPUT_FILE"
+                              CLI_ARGS+=(--input-file "$REPO/$INPUT_FILE")
                             else
                               echo "input_file not found: $INPUT_FILE"
                               exit 1
@@ -353,35 +813,141 @@ pipeline:
                             exit 1
                           fi
 
-                          EXTRA=""
                           if [ "$VALIDATE_ONLY" = "true" ]; then
-                            EXTRA="--validate-only"
+                            CLI_ARGS+=(--validate-only)
                           fi
+                          # CACM signedurl requires both bounds on day 01 (e.g. 20260601-20260701).
+                          # Accept calendar month-end inputs (20260601-20260630) and normalize.
+                          normalize_invoice_period_for_api() {
+                            local p="$1"
+                            if [[ "$p" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{4})([0-9]{2})([0-9]{2})$ ]]; then
+                              local sy="${BASH_REMATCH[1]}" sm="${BASH_REMATCH[2]}" sd="${BASH_REMATCH[3]}"
+                              local ey="${BASH_REMATCH[4]}" em="${BASH_REMATCH[5]}" ed="${BASH_REMATCH[6]}"
+                              if [ "$sd" != "01" ]; then sd="01"; fi
+                              if [ "$ed" != "01" ]; then
+                                local em10=$((10#$em)) ey10=$((10#$ey))
+                                em10=$((em10 + 1))
+                                if [ "$em10" -gt 12 ]; then em10=1; ey10=$((ey10 + 1)); fi
+                                em=$(printf '%02d' "$em10")
+                                ey=$(printf '%04d' "$ey10")
+                                ed="01"
+                              fi
+                              printf '%s' "${sy}${sm}${sd}-${ey}${em}${ed}"
+                              return 0
+                            fi
+                            printf '%s' "$p"
+                          }
                           if [ "$DERIVE" = "true" ]; then
-                            EXTRA="$EXTRA --derive-invoice-period-from-csv"
+                            CLI_ARGS+=(--derive-invoice-period-from-csv)
                           elif [ -n "$INVOICE" ] && [ "$INVOICE" != "null" ]; then
-                            EXTRA="$EXTRA --invoice-period $INVOICE"
+                            INVOICE_NORM="$(normalize_invoice_period_for_api "$INVOICE")"
+                            if [ "$INVOICE_NORM" != "$INVOICE" ]; then
+                              echo "Normalized invoice_period for CACM API: $INVOICE → $INVOICE_NORM"
+                            fi
+                            CLI_ARGS+=(--invoice-period "$INVOICE_NORM")
                           else
                             echo "Set derive_invoice_period_from_csv=true or provide invoice_period"
                             exit 1
                           fi
 
-                          "$PYTHON_BIN" -m cacm_external_ingest.cli \
-                            --account-id "$ACCOUNT_ID" \
-                            --api-key "$API_KEY" \
-                            --provider-id "$PROVIDER_ID" \
-                            --provider-type "$PROVIDER_TYPE" \
-                            --report-out "$WORKDIR/validation_report.json" \
-                            $EXTRA \
-                            $INPUT_ARGS
+                          # Sanitize AWS creds before S3 download (same IncompleteSignature issue as precheck).
+                          strip_cred() {
+                            printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+                          }
+                          if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ "${AWS_ACCESS_KEY_ID}" != "null" ]; then
+                            export AWS_ACCESS_KEY_ID; AWS_ACCESS_KEY_ID="$(strip_cred "$AWS_ACCESS_KEY_ID")"
+                          fi
+                          if [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && [ "${AWS_SECRET_ACCESS_KEY}" != "null" ]; then
+                            export AWS_SECRET_ACCESS_KEY; AWS_SECRET_ACCESS_KEY="$(strip_cred "$AWS_SECRET_ACCESS_KEY")"
+                          fi
+                          if [ -n "${AWS_SESSION_TOKEN:-}" ] && [ "${AWS_SESSION_TOKEN}" != "null" ]; then
+                            export AWS_SESSION_TOKEN; AWS_SESSION_TOKEN="$(strip_cred "$AWS_SESSION_TOKEN")"
+                          else
+                            unset AWS_SESSION_TOKEN || true
+                          fi
+
+                          "$PYTHON_BIN" "${CLI_ARGS[@]}"
 
                           if [ -f "$WORKDIR/validation_report.json" ]; then
-                            export validation_summary=$("$PYTHON_BIN" -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
+                            export validation_summary
+                            validation_summary=$("$PYTHON_BIN" -c "import json; d=json.load(open('$WORKDIR/validation_report.json')); print(json.dumps({k:d[k] for k in ('ok','row_count','billed_cost_total') if k in d}))")
                           fi
                     environmentVariables:
                       - name: HARNESS_API_KEY
                         type: Secret
                         value: Sam-API-Key
+                      - name: AWS_ACCESS_KEY_ID
+                        type: Secret
+                        value: account.sam_aws_access_key_id
+                      - name: AWS_SECRET_ACCESS_KEY
+                        type: Secret
+                        value: account.sam_aws_secret_access_key
+                      - name: AWS_SESSION_TOKEN
+                        type: Secret
+                        value: account.sam_aws_session_token
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: eu-north-1
+                      - name: PIPELINE_ACCOUNT_ID
+                        type: String
+                        value: <+account.identifier>
+                      - name: PIPELINE_PROVIDER_ID
+                        type: String
+                        value: <+pipeline.variables.provider_id>
+                      - name: PIPELINE_PROVIDER_TYPE
+                        type: String
+                        value: <+pipeline.variables.provider_type>
+                      - name: PIPELINE_INVOICE_PERIOD
+                        type: String
+                        value: <+pipeline.variables.invoice_period>
+                      - name: PIPELINE_DERIVE_INVOICE
+                        type: String
+                        value: <+pipeline.variables.derive_invoice_period_from_csv>
+                      - name: PIPELINE_INPUT_FILE
+                        type: String
+                        value: <+pipeline.variables.input_file>
+                      - name: PIPELINE_USE_SAMPLE
+                        type: String
+                        value: <+pipeline.variables.use_sample>
+                      - name: PIPELINE_VALIDATE_ONLY
+                        type: String
+                        value: <+pipeline.variables.validate_only>
+                      - name: PIPELINE_FILE_STORE_REF
+                        type: String
+                        value: <+pipeline.variables.file_store_ref>
+                      - name: PIPELINE_OBJECT_URI
+                        type: String
+                        value: <+pipeline.variables.object_uri>
+                      - name: PIPELINE_OBJECT_URI_S3
+                        type: String
+                        value: <+pipeline.variables.object_uri_s3>
+                      - name: PIPELINE_OBJECT_URI_GCS
+                        type: String
+                        value: <+pipeline.variables.object_uri_gcs>
+                      - name: PIPELINE_OBJECT_URI_AZURE
+                        type: String
+                        value: <+pipeline.variables.object_uri_azure>
+                      - name: PIPELINE_REPO_PATH
+                        type: String
+                        value: <+pipeline.variables.repo_path>
+                      - name: PIPELINE_GIT_REPO_URL
+                        type: String
+                        value: <+pipeline.variables.git_repo_url>
+                      - name: PIPELINE_GIT_BRANCH
+                        type: String
+                        value: <+pipeline.variables.git_branch>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_S3
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_s3>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_GCS
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_gcs>
+                      - name: PIPELINE_REPO_OBJECT_PREFIX_AZURE
+                        type: String
+                        value: <+pipeline.variables.repo_object_prefix_azure>
                     outputVariables:
                       - name: validation_summary
                         type: String

@@ -24,7 +24,7 @@ trigger:
       variables:
         - name: provider_id
           type: String
-          value: 6aaa161da729b114c9ffc862
+          value: 6ab0e5ed6981d14298c1c2f6
         - name: provider_type
           type: String
           value: snowflake
@@ -37,9 +37,6 @@ trigger:
         - name: use_sample
           type: String
           value: "false"
-        - name: repo_object_prefix_s3
-          type: String
-          value: s3://sam-edi-harness-test/external-data-sync-job
         - name: object_uri_s3
           type: String
           value: s3://sam-edi-harness-test/incoming/monthly-snowflake.csv
