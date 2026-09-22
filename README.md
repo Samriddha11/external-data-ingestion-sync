@@ -38,23 +38,23 @@ Follow these steps in **your** account/org/project. Replace every placeholder (`
 
 ### Step 1 — Create secrets
 
-Create **Secret Text** secrets (Harness Secret Manager is fine). Identifiers below match `harness/pipeline.yaml`; rename in YAML if you prefer different IDs.
+Create **Secret Text** secrets (Harness Secret Manager is fine). Suggested identifiers below match pipeline **defaults**; override at Run time via inputs if you use different IDs.
 
 **Required — Harness API**
 
-| Identifier | Value |
-|------------|--------|
-| `Sam-API-Key` | Your Harness PAT/SAT (or change the pipeline env var to your secret id) |
+| Identifier (default input) | Value |
+|----------------------------|--------|
+| `Sam-API-Key` | Your Harness PAT/SAT |
 
-**Required for AWS S3** (account-scoped secrets use the `account.` prefix in the pipeline)
+**Required for AWS S3** (account-scoped secrets use the `account.` prefix)
 
-| Identifier | Value |
-|------------|--------|
+| Identifier (default input) | Value |
+|----------------------------|--------|
 | `sam_aws_access_key_id` | Raw **20-character** Access Key ID only (`AKIA…` / `ASIA…`) — no quotes, no `export`, no newlines |
 | `sam_aws_secret_access_key` | Secret access key only |
 | `sam_aws_session_token` | STS session token if using temporary creds; omit/clear for long-lived IAM keys |
 
-In the pipeline, refs are `account.sam_aws_*`. If you create secrets at **project** scope instead, change those refs to the bare identifier (drop `account.`).
+Use refs like `account.sam_aws_access_key_id` for account-scoped secrets, or the bare identifier for project-scoped. Pass those refs as pipeline inputs (`aws_access_key_secret`, etc.) — defaults already use `account.sam_aws_*`.
 
 **Optional — GCP / Azure** (wire as env vars on **Cloud Auth Precheck** when needed)
 
@@ -75,11 +75,18 @@ In the pipeline, refs are `account.sam_aws_*`. If you create secrets at **projec
 | `projectIdentifier` / `orgIdentifier` | Your org and project |
 | `environmentRef` (stage Ingest) | Your Environment identifier |
 | `infrastructureDefinitions[].identifier` | Your Infra Definition identifier |
-| `HARNESS_API_KEY` secret value | Your API key secret identifier |
-| `AWS_*` secret values | Your AWS secret identifiers (with `account.` if account-scoped) |
-| `AWS_DEFAULT_REGION` | Region of your bucket (e.g. `eu-north-1`, `us-east-1`) |
 
 4. **Save**. Pipeline identifier should remain `cacm_external_cost_ingest` (or update triggers to match).
+
+At **Run** (or in triggers), set secret/region inputs if your IDs differ from the defaults:
+
+| Input | Default | Meaning |
+|-------|---------|---------|
+| `harness_api_key_secret` | `Sam-API-Key` | Secret id for PAT/SAT |
+| `aws_access_key_secret` | `account.sam_aws_access_key_id` | Secret id for Access Key ID |
+| `aws_secret_key_secret` | `account.sam_aws_secret_access_key` | Secret id for Secret Access Key |
+| `aws_session_token_secret` | `account.sam_aws_session_token` | Secret id for session token |
+| `aws_default_region` | `eu-north-1` | S3 bucket region |
 
 > The Custom stage does **not** deploy a service; it only needs the Environment/Infra so Harness can schedule ShellScript steps on your K8s delegate.
 
@@ -97,6 +104,9 @@ In the pipeline, refs are `account.sam_aws_*`. If you create secrets at **projec
 | `derive_invoice_period_from_csv` | `true` (recommended) **or** set `invoice_period` |
 | `git_repo_url` | leave default (this GitHub repo) unless you forked |
 | `git_branch` | `main` |
+| `harness_api_key_secret` | leave default unless your API key secret id differs |
+| `aws_access_key_secret` / `aws_secret_key_secret` / `aws_session_token_secret` | leave defaults or your secret refs |
+| `aws_default_region` | bucket region (default `eu-north-1`) |
 
 Leave other URI / File Store / `repo_object_prefix*` fields empty unless you use them.
 
@@ -154,9 +164,9 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 ### Install checklist
 
 - [ ] External Cost Data Source created; `provider_id` copied  
-- [ ] API key + AWS (or GCP/Azure) secrets created; pipeline YAML refs updated  
+- [ ] API key + AWS (or GCP/Azure) secrets created  
+- [ ] Secret/region inputs match your secret ids (`harness_api_key_secret`, `aws_*_secret`, `aws_default_region`) — or leave defaults  
 - [ ] Environment + Infrastructure Definition point at a working K8s delegate  
-- [ ] `AWS_DEFAULT_REGION` matches the bucket region  
 - [ ] Manual Run with `validate_only=true` then `false`  
 - [ ] Webhook trigger created; curl smoke test  
 - [ ] (Optional) Cron trigger for monthly refresh  
@@ -187,6 +197,11 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 | `git_repo_url` / `git_branch` | Source of the Python job (default: this GitHub repo / `main`) |
 | `repo_object_prefix*` / `repo_path` | Alternate ways to supply job code (object storage or path on the image) |
 | `file_store_ref` | Optional Harness File Store CSV (`july` / `august` shortcuts in the script) |
+| `harness_api_key_secret` | Secret id for PAT/SAT (default `Sam-API-Key`) |
+| `aws_access_key_secret` | Secret id for Access Key ID (default `account.sam_aws_access_key_id`) |
+| `aws_secret_key_secret` | Secret id for Secret Access Key |
+| `aws_session_token_secret` | Secret id for session token |
+| `aws_default_region` | S3 region (default `eu-north-1`) |
 
 ## Features
 
@@ -233,8 +248,9 @@ harness/
 | Account ID | `SxuV0ChbRqWGSYClFlMQMQ` |
 | Org / Project | `sam` / `CCMDemo` |
 | Pipeline | `cacm_external_cost_ingest` |
-| API secret | `Sam-API-Key` |
-| AWS secrets | `account.sam_aws_access_key_id` / `_secret_access_key` / `_session_token` |
+| API secret | `Sam-API-Key` (input `harness_api_key_secret`) |
+| AWS secrets | `account.sam_aws_*` (inputs `aws_*_secret`) |
+| AWS region | `eu-north-1` (input `aws_default_region`) |
 | Env / Infra | `k8ssamtest` / `lbgpock8s` |
 
 Customers should **not** copy these IDs into their install — use Step 2 substitutions above.

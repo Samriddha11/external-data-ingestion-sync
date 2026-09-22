@@ -101,6 +101,31 @@ pipeline:
       description: "Set to august to load CSV from Harness File Store path /cacm-ingest/TA-Identity-August2026-Snowflake.csv (no S3/AWS needed)"
       required: false
       value: <+input>.default()
+    - name: aws_access_key_secret
+      type: String
+      description: "Harness secret identifier for AWS Access Key ID (use account. prefix if account-scoped)"
+      required: false
+      value: <+input>.default(account.sam_aws_access_key_id)
+    - name: aws_secret_key_secret
+      type: String
+      description: "Harness secret identifier for AWS Secret Access Key"
+      required: false
+      value: <+input>.default(account.sam_aws_secret_access_key)
+    - name: aws_session_token_secret
+      type: String
+      description: "Harness secret identifier for AWS session token (optional for long-lived keys)"
+      required: false
+      value: <+input>.default(account.sam_aws_session_token)
+    - name: harness_api_key_secret
+      type: String
+      description: "Harness secret identifier for PAT/SAT used by CCM ingest APIs"
+      required: false
+      value: <+input>.default(Sam-API-Key)
+    - name: aws_default_region
+      type: String
+      description: AWS region for S3 (must match the bucket region)
+      required: false
+      value: <+input>.default(eu-north-1)
   stages:
     - stage:
         name: Ingest
@@ -323,7 +348,7 @@ pipeline:
                                 echo "Extracted Access Key ID from pasted value (now len=${#AWS_ACCESS_KEY_ID})"
                               else
                                 echo "FAIL: AWS_ACCESS_KEY_ID is not a valid AKIA/ASIA key (len=${#AWS_ACCESS_KEY_ID})."
-                                echo "Update account.sam_aws_access_key_id to the raw 20-char Access Key ID only."
+                                echo "Update the AWS access-key secret to the raw 20-char Access Key ID only."
                                 exit 1
                               fi
                             fi
@@ -335,7 +360,7 @@ pipeline:
                             sanitize_aws_env
                             if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
                               echo "FAIL: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set."
-                              echo "Wire Harness secrets account.sam_aws_access_key_id and account.sam_aws_secret_access_key as env vars on this step."
+                              echo "Wire AWS access/secret key secrets via pipeline inputs aws_access_key_secret / aws_secret_key_secret."
                               exit 1
                             fi
                             if [ -z "${AWS_SESSION_TOKEN:-}" ]; then
@@ -489,16 +514,16 @@ pipeline:
                     environmentVariables:
                       - name: AWS_ACCESS_KEY_ID
                         type: Secret
-                        value: account.sam_aws_access_key_id
+                        value: <+pipeline.variables.aws_access_key_secret>
                       - name: AWS_SECRET_ACCESS_KEY
                         type: Secret
-                        value: account.sam_aws_secret_access_key
+                        value: <+pipeline.variables.aws_secret_key_secret>
                       - name: AWS_SESSION_TOKEN
                         type: Secret
-                        value: account.sam_aws_session_token
+                        value: <+pipeline.variables.aws_session_token_secret>
                       - name: AWS_DEFAULT_REGION
                         type: String
-                        value: eu-north-1
+                        value: <+pipeline.variables.aws_default_region>
                       - name: PIPELINE_USE_SAMPLE
                         type: String
                         value: <+pipeline.variables.use_sample>
@@ -745,7 +770,7 @@ pipeline:
                           # Prefer Secret env injection (avoids shell-quoting issues); fall back to expression
                           API_KEY="${HARNESS_API_KEY:-}"
                           if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-                            API_KEY='<+secrets.getValue("Sam-API-Key")>'
+                            API_KEY='<+secrets.getValue(<+pipeline.variables.harness_api_key_secret>)>'
                           fi
                           PROVIDER_ID="${PIPELINE_PROVIDER_ID:-}"
                           PROVIDER_TYPE="${PIPELINE_PROVIDER_TYPE:-}"
@@ -875,19 +900,19 @@ pipeline:
                     environmentVariables:
                       - name: HARNESS_API_KEY
                         type: Secret
-                        value: Sam-API-Key
+                        value: <+pipeline.variables.harness_api_key_secret>
                       - name: AWS_ACCESS_KEY_ID
                         type: Secret
-                        value: account.sam_aws_access_key_id
+                        value: <+pipeline.variables.aws_access_key_secret>
                       - name: AWS_SECRET_ACCESS_KEY
                         type: Secret
-                        value: account.sam_aws_secret_access_key
+                        value: <+pipeline.variables.aws_secret_key_secret>
                       - name: AWS_SESSION_TOKEN
                         type: Secret
-                        value: account.sam_aws_session_token
+                        value: <+pipeline.variables.aws_session_token_secret>
                       - name: AWS_DEFAULT_REGION
                         type: String
-                        value: eu-north-1
+                        value: <+pipeline.variables.aws_default_region>
                       - name: PIPELINE_ACCOUNT_ID
                         type: String
                         value: <+account.identifier>

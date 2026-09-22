@@ -40,3 +40,4 @@ trigger:
         - name: object_uri_s3
           type: String
           value: s3://sam-edi-harness-test/incoming/monthly-snowflake.csv
+        # Optional: override aws_*_secret / harness_api_key_secret / aws_default_region if needed
