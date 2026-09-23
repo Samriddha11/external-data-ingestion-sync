@@ -126,6 +126,31 @@ pipeline:
       description: AWS region for S3 (must match the bucket region)
       required: false
       value: <+input>.default(eu-north-1)
+    - name: gcp_sa_json_secret
+      type: String
+      description: "Harness secret id for GCP service-account JSON (leave empty to use delegate ADC / workload identity)"
+      required: false
+      value: <+input>.default()
+    - name: azure_storage_connection_string_secret
+      type: String
+      description: "Harness secret id for Azure Storage connection string (leave empty if using SP or managed identity)"
+      required: false
+      value: <+input>.default()
+    - name: azure_client_id_secret
+      type: String
+      description: "Harness secret id for Azure service-principal client ID (with azure_client_secret + azure_tenant_id)"
+      required: false
+      value: <+input>.default()
+    - name: azure_client_secret_secret
+      type: String
+      description: "Harness secret id for Azure service-principal client secret"
+      required: false
+      value: <+input>.default()
+    - name: azure_tenant_id_secret
+      type: String
+      description: "Harness secret id for Azure tenant ID"
+      required: false
+      value: <+input>.default()
   stages:
     - stage:
         name: Ingest
@@ -443,8 +468,8 @@ pipeline:
                             else
                               echo "No Azure secrets set — using delegate managed identity / existing az login."
                               az account show >/dev/null 2>&1 || {
-                                echo "FAIL: az not authenticated. Create secrets azure_storage_connection_string"
-                                echo "  or azure_client_id + azure_client_secret + azure_tenant_id and wire them on this step."
+                                echo "FAIL: az not authenticated. Set pipeline inputs azure_storage_connection_string_secret"
+                                echo "  or azure_client_id_secret + azure_client_secret_secret + azure_tenant_id_secret."
                                 exit 1
                               }
                             fi
@@ -524,6 +549,21 @@ pipeline:
                       - name: AWS_DEFAULT_REGION
                         type: String
                         value: <+pipeline.variables.aws_default_region>
+                      - name: GCP_SA_JSON
+                        type: String
+                        value: <+<+pipeline.variables.gcp_sa_json_secret>!=""?secrets.getValue(<+pipeline.variables.gcp_sa_json_secret>):"">
+                      - name: AZURE_STORAGE_CONNECTION_STRING
+                        type: String
+                        value: <+<+pipeline.variables.azure_storage_connection_string_secret>!=""?secrets.getValue(<+pipeline.variables.azure_storage_connection_string_secret>):"">
+                      - name: AZURE_CLIENT_ID
+                        type: String
+                        value: <+<+pipeline.variables.azure_client_id_secret>!=""?secrets.getValue(<+pipeline.variables.azure_client_id_secret>):"">
+                      - name: AZURE_CLIENT_SECRET
+                        type: String
+                        value: <+<+pipeline.variables.azure_client_secret_secret>!=""?secrets.getValue(<+pipeline.variables.azure_client_secret_secret>):"">
+                      - name: AZURE_TENANT_ID
+                        type: String
+                        value: <+<+pipeline.variables.azure_tenant_id_secret>!=""?secrets.getValue(<+pipeline.variables.azure_tenant_id_secret>):"">
                       - name: PIPELINE_USE_SAMPLE
                         type: String
                         value: <+pipeline.variables.use_sample>
@@ -913,6 +953,21 @@ pipeline:
                       - name: AWS_DEFAULT_REGION
                         type: String
                         value: <+pipeline.variables.aws_default_region>
+                      - name: GCP_SA_JSON
+                        type: String
+                        value: <+<+pipeline.variables.gcp_sa_json_secret>!=""?secrets.getValue(<+pipeline.variables.gcp_sa_json_secret>):"">
+                      - name: AZURE_STORAGE_CONNECTION_STRING
+                        type: String
+                        value: <+<+pipeline.variables.azure_storage_connection_string_secret>!=""?secrets.getValue(<+pipeline.variables.azure_storage_connection_string_secret>):"">
+                      - name: AZURE_CLIENT_ID
+                        type: String
+                        value: <+<+pipeline.variables.azure_client_id_secret>!=""?secrets.getValue(<+pipeline.variables.azure_client_id_secret>):"">
+                      - name: AZURE_CLIENT_SECRET
+                        type: String
+                        value: <+<+pipeline.variables.azure_client_secret_secret>!=""?secrets.getValue(<+pipeline.variables.azure_client_secret_secret>):"">
+                      - name: AZURE_TENANT_ID
+                        type: String
+                        value: <+<+pipeline.variables.azure_tenant_id_secret>!=""?secrets.getValue(<+pipeline.variables.azure_tenant_id_secret>):"">
                       - name: PIPELINE_ACCOUNT_ID
                         type: String
                         value: <+account.identifier>

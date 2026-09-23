@@ -38,31 +38,42 @@ Follow these steps in **your** account/org/project. Replace every placeholder (`
 
 ### Step 1 — Create secrets
 
-Create **Secret Text** secrets (Harness Secret Manager is fine). Suggested identifiers below match pipeline **defaults**; override at Run time via inputs if you use different IDs.
+Create **Secret Text** secrets (Harness Secret Manager is fine). You pass the **secret identifier** (name) as a pipeline input — not the secret value itself.
 
-**Required — Harness API**
+**Required — Harness API (CCM ingest)**
 
-| Identifier (default input) | Value |
-|----------------------------|--------|
-| `Sam-API-Key` | Your Harness PAT/SAT |
+| Suggested secret id | What to store | Pipeline input |
+|---------------------|---------------|----------------|
+| `Sam-API-Key` | Harness PAT/SAT with CCM External Data API access | `harness_api_key_secret` (default: `Sam-API-Key`) |
 
-**Required for AWS S3** (account-scoped secrets use the `account.` prefix)
+`harness_api_key_secret` is only the **name** of that secret. At run time Harness decrypts it into `HARNESS_API_KEY` for signed-url / filesinfo / dataingestion calls.
 
-| Identifier (default input) | Value |
-|----------------------------|--------|
-| `sam_aws_access_key_id` | Raw **20-character** Access Key ID only (`AKIA…` / `ASIA…`) — no quotes, no `export`, no newlines |
-| `sam_aws_secret_access_key` | Secret access key only |
-| `sam_aws_session_token` | STS session token if using temporary creds; omit/clear for long-lived IAM keys |
+**Required for AWS S3** (use `account.` prefix when the secret is account-scoped)
 
-Use refs like `account.sam_aws_access_key_id` for account-scoped secrets, or the bare identifier for project-scoped. Pass those refs as pipeline inputs (`aws_access_key_secret`, etc.) — defaults already use `account.sam_aws_*`.
+| Suggested secret id | What to store | Pipeline input |
+|---------------------|---------------|----------------|
+| `sam_aws_access_key_id` | Raw 20-char Access Key ID only (`AKIA…` / `ASIA…`) | `aws_access_key_secret` (default: `account.sam_aws_access_key_id`) |
+| `sam_aws_secret_access_key` | Secret access key only | `aws_secret_key_secret` |
+| `sam_aws_session_token` | STS session token (optional for long-lived IAM keys) | `aws_session_token_secret` |
 
-**Optional — GCP / Azure** (wire as env vars on **Cloud Auth Precheck** when needed)
+Also set `aws_default_region` to your bucket region (default `eu-north-1`).
 
-| Env var | Suggested secret id |
-|---------|---------------------|
-| `GCP_SA_JSON` | `gcp_sa_json` (full service account JSON) |
-| `AZURE_STORAGE_CONNECTION_STRING` | `azure_storage_connection_string` |
-| or | `azure_client_id` / `azure_client_secret` / `azure_tenant_id` |
+**Optional — GCP (GCS `gs://` URIs)**
+
+Leave these inputs **empty** to use the delegate’s ADC / workload identity. To use a service-account key:
+
+| Suggested secret id | What to store | Pipeline input |
+|---------------------|---------------|----------------|
+| `gcp_sa_json` | Full GCP service-account JSON | `gcp_sa_json_secret` |
+
+**Optional — Azure (Blob URIs)**
+
+Leave empty to use managed identity / existing `az login` on the delegate. Prefer **one** of:
+
+| Suggested secret id | What to store | Pipeline input |
+|---------------------|---------------|----------------|
+| `azure_storage_connection_string` | Storage connection string | `azure_storage_connection_string_secret` |
+| **or** `azure_client_id` + `azure_client_secret` + `azure_tenant_id` | Service principal | `azure_client_id_secret` / `azure_client_secret_secret` / `azure_tenant_id_secret` |
 
 ### Step 2 — Import the pipeline
 
@@ -78,15 +89,20 @@ Use refs like `account.sam_aws_access_key_id` for account-scoped secrets, or the
 
 4. **Save**. Pipeline identifier should remain `cacm_external_cost_ingest` (or update triggers to match).
 
-At **Run** (or in triggers), set secret/region inputs if your IDs differ from the defaults:
+At **Run** (or in triggers), override secret/region inputs only if your secret ids differ from the defaults:
 
-| Input | Default | Meaning |
-|-------|---------|---------|
-| `harness_api_key_secret` | `Sam-API-Key` | Secret id for PAT/SAT |
-| `aws_access_key_secret` | `account.sam_aws_access_key_id` | Secret id for Access Key ID |
-| `aws_secret_key_secret` | `account.sam_aws_secret_access_key` | Secret id for Secret Access Key |
-| `aws_session_token_secret` | `account.sam_aws_session_token` | Secret id for session token |
-| `aws_default_region` | `eu-north-1` | S3 bucket region |
+| Input | Default | When to set |
+|-------|---------|-------------|
+| `harness_api_key_secret` | `Sam-API-Key` | Always (or rename to match your PAT/SAT secret id) |
+| `aws_access_key_secret` | `account.sam_aws_access_key_id` | AWS / S3 |
+| `aws_secret_key_secret` | `account.sam_aws_secret_access_key` | AWS / S3 |
+| `aws_session_token_secret` | `account.sam_aws_session_token` | AWS (STS); optional for long-lived keys |
+| `aws_default_region` | `eu-north-1` | AWS bucket region |
+| `gcp_sa_json_secret` | _(empty)_ | GCP — your SA JSON secret id, or leave empty for ADC |
+| `azure_storage_connection_string_secret` | _(empty)_ | Azure — connection string secret id |
+| `azure_client_id_secret` | _(empty)_ | Azure SP (with secret + tenant) |
+| `azure_client_secret_secret` | _(empty)_ | Azure SP |
+| `azure_tenant_id_secret` | _(empty)_ | Azure SP |
 
 > The Custom stage does **not** deploy a service; it only needs the Environment/Infra so Harness can schedule ShellScript steps on your K8s delegate.
 
@@ -104,9 +120,11 @@ At **Run** (or in triggers), set secret/region inputs if your IDs differ from th
 | `derive_invoice_period_from_csv` | `true` (recommended) **or** set `invoice_period` |
 | `git_repo_url` | leave default (this GitHub repo) unless you forked |
 | `git_branch` | `main` |
-| `harness_api_key_secret` | leave default unless your API key secret id differs |
-| `aws_access_key_secret` / `aws_secret_key_secret` / `aws_session_token_secret` | leave defaults or your secret refs |
+| `harness_api_key_secret` | leave default (`Sam-API-Key`) unless your PAT/SAT secret id differs |
+| `aws_access_key_secret` / `aws_secret_key_secret` / `aws_session_token_secret` | leave defaults or your AWS secret refs |
 | `aws_default_region` | bucket region (default `eu-north-1`) |
+| `gcp_sa_json_secret` | only for `gs://` — your SA JSON secret id (or empty for ADC) |
+| `azure_*_secret` | only for Azure Blob — connection string **or** SP client/secret/tenant ids |
 
 Leave other URI / File Store / `repo_object_prefix*` fields empty unless you use them.
 
@@ -164,8 +182,9 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 ### Install checklist
 
 - [ ] External Cost Data Source created; `provider_id` copied  
-- [ ] API key + AWS (or GCP/Azure) secrets created  
-- [ ] Secret/region inputs match your secret ids (`harness_api_key_secret`, `aws_*_secret`, `aws_default_region`) — or leave defaults  
+- [ ] `harness_api_key_secret` points at a PAT/SAT secret  
+- [ ] Cloud secrets created for the storage you use (AWS and/or GCP and/or Azure)  
+- [ ] Matching `aws_*` / `gcp_*` / `azure_*` secret inputs set (or AWS defaults left as-is)  
 - [ ] Environment + Infrastructure Definition point at a working K8s delegate  
 - [ ] Manual Run with `validate_only=true` then `false`  
 - [ ] Webhook trigger created; curl smoke test  
@@ -197,11 +216,14 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 | `git_repo_url` / `git_branch` | Source of the Python job (default: this GitHub repo / `main`) |
 | `repo_object_prefix*` / `repo_path` | Alternate ways to supply job code (object storage or path on the image) |
 | `file_store_ref` | Optional Harness File Store CSV (`july` / `august` shortcuts in the script) |
-| `harness_api_key_secret` | Secret id for PAT/SAT (default `Sam-API-Key`) |
+| `harness_api_key_secret` | Secret **id** for PAT/SAT used by CCM APIs (default `Sam-API-Key`) — not the key value |
 | `aws_access_key_secret` | Secret id for Access Key ID (default `account.sam_aws_access_key_id`) |
 | `aws_secret_key_secret` | Secret id for Secret Access Key |
 | `aws_session_token_secret` | Secret id for session token |
 | `aws_default_region` | S3 region (default `eu-north-1`) |
+| `gcp_sa_json_secret` | Secret id for GCP SA JSON (optional; empty → ADC) |
+| `azure_storage_connection_string_secret` | Secret id for Azure connection string (optional) |
+| `azure_client_id_secret` / `azure_client_secret_secret` / `azure_tenant_id_secret` | Secret ids for Azure service principal (optional) |
 
 ## Features
 
@@ -251,6 +273,7 @@ harness/
 | API secret | `Sam-API-Key` (input `harness_api_key_secret`) |
 | AWS secrets | `account.sam_aws_*` (inputs `aws_*_secret`) |
 | AWS region | `eu-north-1` (input `aws_default_region`) |
+| GCP / Azure secrets | optional inputs `gcp_sa_json_secret`, `azure_*_secret` |
 | Env / Infra | `k8ssamtest` / `lbgpock8s` |
 
 Customers should **not** copy these IDs into their install — use Step 2 substitutions above.
