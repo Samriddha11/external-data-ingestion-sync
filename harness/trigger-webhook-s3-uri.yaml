@@ -3,7 +3,7 @@
 #
 # Minimal curl:
 #   curl -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
-#     -d '{"object_uri_s3":"s3://sam-edi-harness-test/Asteria-Data-Systems-Snowflake-July-2026.csv"}'
+#     -d '{"object_uri_s3":"s3://YOUR-BUCKET/path/monthly.csv"}'
 #
 # Optional JSON fields: invoice_period, validate_only, provider_type, derive_invoice_period_from_csv
 # Secret/region refs use pipeline defaults unless overridden in inputYaml below.
@@ -14,8 +14,8 @@ trigger:
   description: Trigger CACM external cost ingest with S3 URI from a curl/webhook payload
   tags:
     cacm: external-ingest
-  orgIdentifier: sam
-  projectIdentifier: CCMDemo
+  orgIdentifier: YOUR_ORG
+  projectIdentifier: YOUR_PROJECT
   pipelineIdentifier: cacm_external_cost_ingest
   source:
     type: Webhook
@@ -31,7 +31,7 @@ trigger:
       variables:
         - name: provider_id
           type: String
-          value: 6ab0e5ed6981d14298c1c2f6
+          value: YOUR_PROVIDER_UUID
         - name: provider_type
           type: String
           value: snowflake
@@ -53,19 +53,19 @@ trigger:
         - name: git_branch
           type: String
           value: main
-        # Optional overrides (defaults match demo secrets / eu-north-1):
+        # Optional overrides (defaults match suggested secret ids / us-east-1):
         # - name: harness_api_key_secret
         #   type: String
-        #   value: Sam-API-Key
+        #   value: harness_ccm_api_key
         # - name: aws_access_key_secret
         #   type: String
-        #   value: account.sam_aws_access_key_id
+        #   value: account.aws_access_key_id
         # - name: aws_secret_key_secret
         #   type: String
-        #   value: account.sam_aws_secret_access_key
+        #   value: account.aws_secret_access_key
         # - name: aws_session_token_secret
         #   type: String
-        #   value: account.sam_aws_session_token
+        #   value: account.aws_session_token
         # - name: aws_default_region
         #   type: String
-        #   value: eu-north-1
+        #   value: us-east-1

@@ -1,9 +1,10 @@
 # Optional Input Set — reuse from trigger Pipeline Input or link in Trigger settings.
+# Replace YOUR_* placeholders before import.
 inputSet:
   name: CACM Monthly External Ingest
   identifier: cacm_monthly_external_ingest
-  orgIdentifier: sam
-  projectIdentifier: CCMDemo
+  orgIdentifier: YOUR_ORG
+  projectIdentifier: YOUR_PROJECT
   tags:
     cacm: external-ingest
   pipeline:
@@ -11,7 +12,7 @@ inputSet:
     variables:
       - name: provider_id
         type: String
-        value: 6aaa161da729b114c9ffc862
+        value: YOUR_PROVIDER_UUID
       - name: provider_type
         type: String
         value: snowflake
@@ -26,7 +27,7 @@ inputSet:
         value: "false"
       - name: repo_object_prefix_s3
         type: String
-        value: s3://sam-edi-harness-test/external-data-sync-job
+        value: s3://YOUR-BUCKET/external-data-sync-job
       - name: object_uri_s3
         type: String
-        value: s3://sam-edi-harness-test/incoming/monthly-snowflake.csv
+        value: s3://YOUR-BUCKET/incoming/monthly-snowflake.csv

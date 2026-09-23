@@ -9,3 +9,5 @@ validation_report.json
 !examples/sample_focus.csv
 !examples/TA-Identity-August2026-Snowflake.csv
 !examples/TA-Identity-July2026-Snowflake.csv
+agent-tools/
+.maestro/

@@ -20,7 +20,7 @@ How billing CSVs move from object storage into Harness CCM via the Custom pipeli
 | **Pipeline `cacm_external_cost_ingest`** | Two ShellScript steps on the K8s Environment/Infra |
 | **Cloud Auth Precheck** | Allowlists URI; verifies AWS/GCP/Azure access before ingest |
 | **Transform Validate Ingest** | Clones this GitHub repo, downloads CSV, FOCUS transform/validate, CCM APIs |
-| **Harness secrets** | API key (`Sam-API-Key`) + cloud creds (`account.sam_aws_*` or project equivalents) |
+| **Harness secrets** | API key (`harness_ccm_api_key`) + cloud creds (`account.aws_access_key_id` / `account.aws_secret_access_key`, or project equivalents) |
 | **Object storage** | Source of truth for month CSVs (`s3://`, `gs://`, or Azure blob) |
 | **GitHub** | Source of the Python job (`cacm_external_ingest`) — not the billing files |
 | **CCM External Cost Data Source** | Destination provider UUID (`provider_id`) for signed upload + ingestion |

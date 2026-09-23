@@ -1,12 +1,13 @@
-# Cron: 06:00 UTC on day 5 of every month (11:30 AM IST).
+# Cron: 06:00 UTC on day 5 of every month.
 # Harness evaluates UNIX cron in UTC unless timezone FF is enabled on your account.
 # UI: Pipeline Studio → Triggers → New Trigger → Cron → paste or import this file.
+# Replace YOUR_* placeholders before import.
 trigger:
   name: CACM External Cost Monthly Day 5
   identifier: cacm_external_cost_monthly_day5
   enabled: true
-  orgIdentifier: sam
-  projectIdentifier: CCMDemo
+  orgIdentifier: YOUR_ORG
+  projectIdentifier: YOUR_PROJECT
   pipelineIdentifier: cacm_external_cost_ingest
   description: Ingest prior-month Snowflake export on the 5th (configure CSV URI in inputYaml)
   tags:
@@ -24,7 +25,7 @@ trigger:
       variables:
         - name: provider_id
           type: String
-          value: 6ab0e5ed6981d14298c1c2f6
+          value: YOUR_PROVIDER_UUID
         - name: provider_type
           type: String
           value: snowflake
@@ -39,5 +40,5 @@ trigger:
           value: "false"
         - name: object_uri_s3
           type: String
-          value: s3://sam-edi-harness-test/incoming/monthly-snowflake.csv
+          value: s3://YOUR-BUCKET/incoming/monthly-snowflake.csv
         # Optional: override aws_*_secret / harness_api_key_secret / aws_default_region if needed

@@ -2,7 +2,7 @@
 
 Automates **FOCUS CSV** validation and upload to a Harness **External Cost Data Source** (Cloud & AI Cost Management).
 
-**GitHub:** [Samriddha11/external-data-ingestion-sync](https://github.com/Samriddha11/external-data-ingestion-sync)
+**Repository:** clone or fork this GitHub repo, then set `git_repo_url` to your clone URL when you import the pipeline.
 
 ## What this does
 
@@ -44,7 +44,7 @@ Create **Secret Text** secrets (Harness Secret Manager is fine). You pass the **
 
 | Suggested secret id | What to store | Pipeline input |
 |---------------------|---------------|----------------|
-| `Sam-API-Key` | Harness PAT/SAT with CCM External Data API access | `harness_api_key_secret` (default: `Sam-API-Key`) |
+| `harness_ccm_api_key` | Harness PAT/SAT with CCM External Data API access | `harness_api_key_secret` (default: `harness_ccm_api_key`) |
 
 `harness_api_key_secret` is only the **name** of that secret. At run time Harness decrypts it into `HARNESS_API_KEY` for signed-url / filesinfo / dataingestion calls.
 
@@ -52,11 +52,11 @@ Create **Secret Text** secrets (Harness Secret Manager is fine). You pass the **
 
 | Suggested secret id | What to store | Pipeline input |
 |---------------------|---------------|----------------|
-| `sam_aws_access_key_id` | Raw 20-char Access Key ID only (`AKIA…` / `ASIA…`) | `aws_access_key_secret` (default: `account.sam_aws_access_key_id`) |
-| `sam_aws_secret_access_key` | Secret access key only | `aws_secret_key_secret` |
-| `sam_aws_session_token` | STS session token (optional for long-lived IAM keys) | `aws_session_token_secret` |
+| `aws_access_key_id` | Raw 20-char Access Key ID only (`AKIA…` / `ASIA…`) | `aws_access_key_secret` (default: `account.aws_access_key_id`) |
+| `aws_secret_access_key` | Secret access key only | `aws_secret_key_secret` |
+| `aws_session_token` | STS session token (optional for long-lived IAM keys) | `aws_session_token_secret` |
 
-Also set `aws_default_region` to your bucket region (default `eu-north-1`).
+Also set `aws_default_region` to your bucket region (default `us-east-1`).
 
 **Optional — GCP (GCS `gs://` URIs)**
 
@@ -83,9 +83,10 @@ Leave empty to use managed identity / existing `az login` on the delegate. Prefe
 
 | YAML location | Change to |
 |---------------|-----------|
-| `projectIdentifier` / `orgIdentifier` | Your org and project |
-| `environmentRef` (stage Ingest) | Your Environment identifier |
-| `infrastructureDefinitions[].identifier` | Your Infra Definition identifier |
+| `projectIdentifier` / `orgIdentifier` | Your org and project (replace `YOUR_ORG` / `YOUR_PROJECT`) |
+| `environmentRef` (stage Ingest) | Your Environment identifier (replace `YOUR_K8S_ENVIRONMENT`) |
+| `infrastructureDefinitions[].identifier` | Your Infra Definition identifier (replace `YOUR_K8S_INFRASTRUCTURE`) |
+| `git_repo_url` default | Your fork or clone HTTPS URL (replace `YOUR_ORG/...`) |
 
 4. **Save**. Pipeline identifier should remain `cacm_external_cost_ingest` (or update triggers to match).
 
@@ -93,11 +94,11 @@ At **Run** (or in triggers), override secret/region inputs only if your secret i
 
 | Input | Default | When to set |
 |-------|---------|-------------|
-| `harness_api_key_secret` | `Sam-API-Key` | Always (or rename to match your PAT/SAT secret id) |
-| `aws_access_key_secret` | `account.sam_aws_access_key_id` | AWS / S3 |
-| `aws_secret_key_secret` | `account.sam_aws_secret_access_key` | AWS / S3 |
-| `aws_session_token_secret` | `account.sam_aws_session_token` | AWS (STS); optional for long-lived keys |
-| `aws_default_region` | `eu-north-1` | AWS bucket region |
+| `harness_api_key_secret` | `harness_ccm_api_key` | Always (or rename to match your PAT/SAT secret id) |
+| `aws_access_key_secret` | `account.aws_access_key_id` | AWS / S3 |
+| `aws_secret_key_secret` | `account.aws_secret_access_key` | AWS / S3 |
+| `aws_session_token_secret` | `account.aws_session_token` | AWS (STS); optional for long-lived keys |
+| `aws_default_region` | `us-east-1` | AWS bucket region |
 | `gcp_sa_json_secret` | _(empty)_ | GCP — your SA JSON secret id, or leave empty for ADC |
 | `azure_storage_connection_string_secret` | _(empty)_ | Azure — connection string secret id |
 | `azure_client_id_secret` | _(empty)_ | Azure SP (with secret + tenant) |
@@ -118,11 +119,11 @@ At **Run** (or in triggers), override secret/region inputs only if your secret i
 | `use_sample` | `false` |
 | `validate_only` | `true` first |
 | `derive_invoice_period_from_csv` | `true` (recommended) **or** set `invoice_period` |
-| `git_repo_url` | leave default (this GitHub repo) unless you forked |
+| `git_repo_url` | your fork/clone HTTPS URL |
 | `git_branch` | `main` |
-| `harness_api_key_secret` | leave default (`Sam-API-Key`) unless your PAT/SAT secret id differs |
+| `harness_api_key_secret` | leave default (`harness_ccm_api_key`) unless your PAT/SAT secret id differs |
 | `aws_access_key_secret` / `aws_secret_key_secret` / `aws_session_token_secret` | leave defaults or your AWS secret refs |
-| `aws_default_region` | bucket region (default `eu-north-1`) |
+| `aws_default_region` | bucket region (default `us-east-1`) |
 | `gcp_sa_json_secret` | only for `gs://` — your SA JSON secret id (or empty for ADC) |
 | `azure_*_secret` | only for Azure Blob — connection string **or** SP client/secret/tenant ids |
 
@@ -184,8 +185,9 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 - [ ] External Cost Data Source created; `provider_id` copied  
 - [ ] `harness_api_key_secret` points at a PAT/SAT secret  
 - [ ] Cloud secrets created for the storage you use (AWS and/or GCP and/or Azure)  
-- [ ] Matching `aws_*` / `gcp_*` / `azure_*` secret inputs set (or AWS defaults left as-is)  
-- [ ] Environment + Infrastructure Definition point at a working K8s delegate  
+- [ ] Matching `aws_*` / `gcp_*` / `azure_*` secret inputs set (or suggested defaults left as-is)  
+- [ ] `orgIdentifier` / `projectIdentifier` / Environment / Infra placeholders replaced  
+- [ ] `git_repo_url` points at your clone or fork  
 - [ ] Manual Run with `validate_only=true` then `false`  
 - [ ] Webhook trigger created; curl smoke test  
 - [ ] (Optional) Cron trigger for monthly refresh  
@@ -213,14 +215,14 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 | `object_uri_azure` | Azure HTTPS or `azure://account/container/file.csv` |
 | `use_sample` | `true` → bundled `examples/sample_focus.csv` |
 | `validate_only` | `true` → skip CCM ingest APIs |
-| `git_repo_url` / `git_branch` | Source of the Python job (default: this GitHub repo / `main`) |
+| `git_repo_url` / `git_branch` | Source of the Python job (set to your clone/fork HTTPS URL / `main`) |
 | `repo_object_prefix*` / `repo_path` | Alternate ways to supply job code (object storage or path on the image) |
 | `file_store_ref` | Optional Harness File Store CSV (`july` / `august` shortcuts in the script) |
-| `harness_api_key_secret` | Secret **id** for PAT/SAT used by CCM APIs (default `Sam-API-Key`) — not the key value |
-| `aws_access_key_secret` | Secret id for Access Key ID (default `account.sam_aws_access_key_id`) |
+| `harness_api_key_secret` | Secret **id** for PAT/SAT used by CCM APIs (default `harness_ccm_api_key`) — not the key value |
+| `aws_access_key_secret` | Secret id for Access Key ID (default `account.aws_access_key_id`) |
 | `aws_secret_key_secret` | Secret id for Secret Access Key |
 | `aws_session_token_secret` | Secret id for session token |
-| `aws_default_region` | S3 region (default `eu-north-1`) |
+| `aws_default_region` | S3 region (default `us-east-1`) |
 | `gcp_sa_json_secret` | Secret id for GCP SA JSON (optional; empty → ADC) |
 | `azure_storage_connection_string_secret` | Secret id for Azure connection string (optional) |
 | `azure_client_id_secret` / `azure_client_secret_secret` / `azure_tenant_id_secret` | Secret ids for Azure service principal (optional) |
@@ -235,7 +237,7 @@ Re-uploading the same file/period can hit duplicate-import errors; use a new obj
 ## Local CLI
 
 ```bash
-git clone https://github.com/Samriddha11/external-data-ingestion-sync.git
+git clone <this-repository-url>
 cd external-data-ingestion-sync
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -262,21 +264,6 @@ harness/
   trigger-monthly-day5.yaml     # Optional cron
   input-set-monthly-ingest.yaml # Optional input set
 ```
-
-## Reference demo account (maintainers)
-
-| Field | Value |
-|--------|--------|
-| Account ID | `SxuV0ChbRqWGSYClFlMQMQ` |
-| Org / Project | `sam` / `CCMDemo` |
-| Pipeline | `cacm_external_cost_ingest` |
-| API secret | `Sam-API-Key` (input `harness_api_key_secret`) |
-| AWS secrets | `account.sam_aws_*` (inputs `aws_*_secret`) |
-| AWS region | `eu-north-1` (input `aws_default_region`) |
-| GCP / Azure secrets | optional inputs `gcp_sa_json_secret`, `azure_*_secret` |
-| Env / Infra | `k8ssamtest` / `lbgpock8s` |
-
-Customers should **not** copy these IDs into their install — use Step 2 substitutions above.
 
 ## Prerequisites (summary)
 

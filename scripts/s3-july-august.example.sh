@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Example: validate then ingest July + August test CSVs from S3.
-# 1. Copy to s3-july-august.sh and set BUCKET, PREFIX, API key.
+# 1. Copy to s3-july-august.sh and set BUCKET, PREFIX, API key, account, provider.
 # 2. aws configure / IAM role must allow s3:GetObject on the prefix.
 # 3. Run validate-only first, then set VALIDATE_ONLY=false.
 
@@ -9,8 +9,8 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
 export HARNESS_API_KEY="${HARNESS_API_KEY:?set HARNESS_API_KEY}"
-ACCOUNT_ID="SxuV0ChbRqWGSYClFlMQMQ"
-PROVIDER_ID="6aaa161da729b114c9ffc862"
+ACCOUNT_ID="${ACCOUNT_ID:?set ACCOUNT_ID}"
+PROVIDER_ID="${PROVIDER_ID:?set PROVIDER_ID}"
 BUCKET="${BUCKET:?set BUCKET}"
 PREFIX="${PREFIX:-cacm-external-test/}"   # e.g. cacm-external-test/july.csv
 
